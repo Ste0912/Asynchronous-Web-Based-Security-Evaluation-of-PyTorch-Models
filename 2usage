@@ -1,0 +1,42 @@
+terminale 1
+Navigate to your project folder with this syntax :
+    cd /mnt/c/path/to/your/project
+example:
+    cd /mnt/c/Users/ste_1/PycharmProjects/fastApiProject
+
+Create and Activate a Virtual Environment :
+    source name_of_your_environment/bin/activate
+example:
+    source venv_wsl/bin/activate
+
+
+
+Running the Worker and API
+Start the Celery Worker: 
+    python3 -m celery -A worker.celery_app worker --loglevel=info
+
+
+
+
+
+Terminal 2 (The API)
+Open a new WSL terminal window.
+Navigate to the project folder with this syntax:
+    cd /mnt/c/path/to/your/project
+example:
+    cd /mnt/c/Users/ste_1/PycharmProjects/fastApiProject
+
+
+Activate the environment: 
+    source name_of_your_environment/bin/activate
+example:
+    source venv_wsl/bin/activate
+
+
+
+Start the FastAPI Server:
+uvicorn main:app --reload
+
+
+Testing the Setup
+Open your Windows browser to http://127.0.0.1:8000/docs
