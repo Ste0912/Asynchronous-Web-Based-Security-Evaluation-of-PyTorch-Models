@@ -5,7 +5,6 @@ import urllib.request
 from secmlt.models.pytorch.base_pytorch_nn import BasePytorchClassifier
 
 
-# Scarica le etichette di ImageNet
 url = "https://raw.githubusercontent.com/pytorch/hub/master/imagenet_classes.txt"
 filename = "imagenet_classes.txt"
 urllib.request.urlretrieve(url, filename)
@@ -72,3 +71,4 @@ def prototype_test():
 
 if __name__ == "__main__":
     prototype_test()
+
