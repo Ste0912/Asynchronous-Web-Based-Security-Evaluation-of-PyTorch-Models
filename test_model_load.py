@@ -1,22 +1,30 @@
 import torch
 import traceback
 import torchvision.models as models
+import urllib.request
 from secmlt.models.pytorch.base_pytorch_nn import BasePytorchClassifier
 
 
+# Scarica le etichette di ImageNet
+url = "https://raw.githubusercontent.com/pytorch/hub/master/imagenet_classes.txt"
+filename = "imagenet_classes.txt"
+urllib.request.urlretrieve(url, filename)
+
 def prototype_test():
     print("--- Phase 1: Loading Model from Torch Hub ---")
+
     # List of some available models in torchvision
     #To make the strings more readable after printing we can skip one line
     print("\n")
 
     print("The list of some available models is the following:")
     print("\n")
+
     available_models = [
         'resnet18', 'alexnet', 'vgg16', 'squeezenet1_0', 'densenet121',
         'inception_v3', 'googlenet', 'shufflenet_v2_x1_0', 'mobilenet_v2',
         'resnext50_32x4d', 'wide_resnet50_2', 'mnasnet1_0'
-    ]
+         ]
     for index,model_name in enumerate(available_models, start=1):
         print(f"-{index} {model_name}")
     print("\n")
@@ -48,8 +56,14 @@ def prototype_test():
         # Run prediction through the security wrapper
         # The wrapper expects the input to be on the correct device (CPU by default here)
         output = secml_model.predict(dummy_input)
+        predicted_class_id = output.argmax().item()
 
-        print(f"Success: The model produced a prediction with shape {output.shape}")
+        # read labels
+        with open("imagenet_classes.txt", "r") as f:
+            categories = [s.strip() for s in f.readlines()]
+
+
+        print(f"\n Success: The model produced '{categories[predicted_class_id]}' as prediction with ID '{predicted_class_id}' with shape {output.shape}")
     except Exception as e:
         print(f"Error during prediction: {e}")
         # Detailed error printing to help debug if mismatch occurs
