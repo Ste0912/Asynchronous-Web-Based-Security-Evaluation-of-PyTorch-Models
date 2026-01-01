@@ -1,16 +1,16 @@
 from fastapi import FastAPI
 from celery.result import AsyncResult
 from worker import create_dummy_task
-from worker import another_dummy_task
+
 
 app = FastAPI()
 
-# POST endpoint to submit a URL
+# POST endpoint to submit a Model Name
 @app.post("/submit_eval")
-def submit_eval(model_url: str):
-    # Send task to Redis
-    task = create_dummy_task.delay(model_url)
-    return {"job_id": task.id, "message": "Task enqueued"}
+def submit_eval(model_name: str):
+    # Send task to Redis,pass the input string directly to the worker
+    task = create_dummy_task.delay(model_name)
+    return {"job_id": task.id, "message": "Evaluation Task enqueued"}
 
 # GET endpoint to check status
 @app.get("/job_status/{job_id}")
@@ -28,9 +28,5 @@ def delete_job(job_id: str):
     task_result = AsyncResult(job_id, app=create_dummy_task.app)
     if task_result.state != 'PENDING':
         task_result.forget()
+    return {"job_id": job_id, "message": "Job deleted"}
 
-#use another_dummy_task
-@app.post("/submit_another_task")
-def submit_another_task(data: str):
-    task = another_dummy_task.delay(data)
-    return {"job_id": task.id, "message": "Another task enqueued"}
