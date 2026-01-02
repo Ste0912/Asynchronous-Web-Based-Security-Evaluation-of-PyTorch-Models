@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SecML-Torch Robustness Evaluator</title>
+    <style>
+        body { font-family: sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+        .card { border: 1px solid #ccc; padding: 1.5rem; border-radius: 8px; margin-bottom: 1.5rem; background: #f9f9f9; }
+        button { background-color: #007bff; color: white; border: none; padding: 0.5rem 1rem; cursor: pointer; border-radius: 4px; }
+        button:hover { background-color: #0056b3; }
+        input[type="text"] { width: 70%; padding: 0.5rem; margin-right: 0.5rem; }
+        pre { background: #333; color: #fff; padding: 1rem; overflow-x: auto; border-radius: 4px; }
+        .status-success { color: green; font-weight: bold; }
+        .status-pending { color: orange; font-weight: bold; }
+        .status-failed { color: red; font-weight: bold; }
+        /*Loading Spinner CSS */
+        .loader {
+            border: 5px solid #f3f3f3; /* Light grey */
+            border-top: 5px solid #007bff; /* Blue */
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            vertical-align: middle;
+            margin-right: 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .progress-container {
+            margin-top: 15px;
+            padding: 10px;
+            background: #e9ecef;
+            border-radius: 4px;
+            display: none; /* Hidden by default */
+        }
+    </style>
+</head>
+<body>
+
+    <h1>SecML-Torch Dashboard</h1>
+    <p>Asynchronous Security Evaluation of PyTorch Models</p>
+
+    <div class="card">
+        <h2>1. Start New Evaluation</h2>
+        <p>Select a RobustBench model name </code> </p>
+        <select id="modelName">
+            <option value="Carmon2019Unlabeled">Carmon2019Unlabeled</option>
+            <option value="Rice2020Overfitting">Rice2020Overfitting</option>
+            <option value="Rade2021Helper_extra">Rade2021Helper_extra</option>
+            <option value="Bartoldson2024Adversarial_WRN-94-16">Bartoldson2024Adversarial_WRN-94-16</option>
+            <option value="Kang2021Stable">Kang2021Stable</option>
+            <option value="Amini2024MeanSparse_Ra_WRN_70_16">Amini2024MeanSparse_Ra_WRN_70_16</option>
+            <option value="Gowal2021Improving_70_16_ddpm_100m">Gowal2021Improving_70_16_ddpm_100m</option>
+        </select>
+
+        <button onclick="submitJob()">Analyze Model</button>
+
+        <div id="submitResult" style="margin-top: 10px; display:none;">
+            <strong>Job Enqueued!</strong> ID: <span id="newJobId" style="font-family: monospace; font-weight: bold;"></span>
+            <br><small>(Copy this ID or click the button below to auto-track)</small>
+            <br><br>
+            <button onclick="trackCurrentJob()" style="background-color: #28a745;">Track this Job</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>2. Check Evaluation Status</h2>
+        <input type="text" id="jobIdInput" placeholder="Paste Job ID here">
+        <button onclick="checkStatus()">Check Status</button>
+
+        <div id="statusResult" style="margin-top: 1rem;"></div>
+    </div>
+
+    <script>
+        let pollingInterval = null;
+        // FUNCTION 1: Submit the model name to FastAPI
+        async function submitJob() {
+            const model = document.getElementById('modelName').value;
+            const resultDiv = document.getElementById('submitResult');
+
+            // Reset UI
+            document.getElementById('statusResult').innerHTML = '';
+            if (pollingInterval) clearInterval(pollingInterval);
+
+            try {
+                const response = await fetch(`/submit_eval?model_name=${model}`, { method: 'POST' });
+                const data = await response.json();
+
+                // Show the Job ID
+                document.getElementById('newJobId').innerText = data.job_id;
+                resultDiv.style.display = 'block';
+            } catch (error) {
+                alert("Error submitting job: " + error);
+            }
+        }
+
+        // Helper: Move ID and START polling
+        function trackCurrentJob() {
+            const id = document.getElementById('newJobId').innerText;
+            document.getElementById('jobIdInput').value = id;
+            startPolling(id); // Starts automation
+        }
+
+        // FUNCTION 2: Poll Status Automatically
+        function startPolling(jobId = null) {
+            const id = jobId || document.getElementById('jobIdInput').value;
+            if (!id) return alert("Please enter a Job ID");
+
+            // Stop any existing poll
+            if (pollingInterval) clearInterval(pollingInterval);
+
+            // Show "Processing" State immediately
+            const statusDiv = document.getElementById('statusResult');
+            statusDiv.innerHTML = `
+                <div class="progress-container" style="display:block;">
+                    <div class="loader"></div>
+                    <span><strong>Processing...</strong> The worker is downloading and evaluating the model. This may take a few seconds.</span>
+                </div>
+            `;
+
+            // Start the Interval (Check every 2 seconds)
+            pollingInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`/job_status/${id}`);
+                    const data = await response.json();
+
+                    // If finished (SUCCESS or FAILURE), stop polling and show result
+                    if (data.status === 'SUCCESS' || data.status === 'FAILURE' || data.status === 'REVOKED') {
+                        clearInterval(pollingInterval);
+                        renderFinalResult(data);
+                    }
+                    // If PENDING or STARTED, do nothing (just keep spinning)
+                } catch (error) {
+                    clearInterval(pollingInterval);
+                    statusDiv.innerHTML = `<p style="color:red">Connection Error: ${error}</p>`;
+                }
+            }, 2000);
+        }
+
+        // Helper to render the final JSON
+        function renderFinalResult(data) {
+            const colorClass = data.status === 'SUCCESS' ? 'status-success' : 'status-failed';
+            const html = `
+                <h3>Status: <span class="${colorClass}">${data.status}</span></h3>
+                <pre>${JSON.stringify(data.result, null, 2)}</pre>
+            `;
+            document.getElementById('statusResult').innerHTML = html;
+        }
+
+        // Manual check button works, but uses the polling function once
+        function checkStatus() {
+            startPolling();
+        }
+
+    </script>
+</body>
+</html>
