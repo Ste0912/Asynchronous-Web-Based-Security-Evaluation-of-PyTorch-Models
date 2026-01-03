@@ -14,11 +14,16 @@ app.mount("/static", StaticFiles(directory="static", html=True), name="static")
 async def root():
     return RedirectResponse(url="/static/index.html")
 
-# POST endpoint to submit a Model Name
+# POST endpoint to submit a Model Name AND Attack Parameters
 @app.post("/submit_eval")
-def submit_eval(model_name: str):
-    # Send task to Redis,pass the input string directly to the worker
-    task = create_dummy_task.delay(model_name)
+def submit_eval(
+        model_name: str,
+        epsilon: float = 0.03137,  # Default to 8/255
+        num_steps: int = 10,       # Default to 10
+        step_size: float = 0.00784 # Default to 2/255
+                ):
+    # Send task to Redis, passing ALL parameters to the worker
+    task = create_dummy_task.delay(model_name, epsilon, num_steps, step_size)
     return {"job_id": task.id, "message": "Evaluation Task enqueued"}
 
 # GET endpoint to check status
