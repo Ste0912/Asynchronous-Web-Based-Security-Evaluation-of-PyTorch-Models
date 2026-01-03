@@ -6,7 +6,7 @@
     <title>SecML-Torch Robustness Evaluator</title>
     <style>
         body { font-family: sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
-        .card { border: 1px solid #ccc; padding: 1.5rem; border-radius: 8px; margin-bottom: 1.5rem; background: #f9f9f9; }
+        .card { border: 1px solid #ccc; padding: 2.5rem; border-radius: 8px; margin-bottom: 1.5rem; background: #f9f9f9; }
         button { background-color: #007bff; color: white; border: none; padding: 0.5rem 1rem; cursor: pointer; border-radius: 4px; }
         button:hover { background-color: #0056b3; }
         input[type="text"] { width: 70%; padding: 0.5rem; margin-right: 0.5rem; }
@@ -25,6 +25,7 @@
             display: inline-block;
             vertical-align: middle;
             margin-right: 10px;
+            flex-shrink: 0; /* Prevents resizing in a flex container */
         }
 
         @keyframes spin {
@@ -60,6 +61,21 @@
         </select>
 
         <button onclick="submitJob()">Analyze Model</button>
+        <div style="margin-top: 15px; margin-bottom: 15px; border-top: 1px solid #ddd; padding-top: 10px;">
+            <p><strong>Attack Configuration (PGD):</strong></p>
+
+            <label>Epsilon (Perturbation limit):</label><br>
+            <input type="number" id="epsilon" value="0.03137" step="0.0001" style="width: 100px;">
+            <br><br>
+
+            <label>Num Steps (Iterations):</label><br>
+            <input type="number" id="numSteps" value="10" step="1" style="width: 100px;">
+            <br><br>
+
+            <label>Step Size (Alpha):</label><br>
+            <input type="number" id="stepSize" value="0.00784" step="0.0001" style="width: 100px;">
+        </div>
+
 
         <div id="submitResult" style="margin-top: 10px; display:none;">
             <strong>Job Enqueued!</strong> ID: <span id="newJobId" style="font-family: monospace; font-weight: bold;"></span>
@@ -82,6 +98,12 @@
         // FUNCTION 1: Submit the model name to FastAPI
         async function submitJob() {
             const model = document.getElementById('modelName').value;
+
+            // Get values from input boxes
+            const eps = document.getElementById('epsilon').value;
+            const steps = document.getElementById('numSteps').value;
+            const alpha = document.getElementById('stepSize').value;
+
             const resultDiv = document.getElementById('submitResult');
 
             // Reset UI
@@ -89,7 +111,8 @@
             if (pollingInterval) clearInterval(pollingInterval);
 
             try {
-                const response = await fetch(`/submit_eval?model_name=${model}`, { method: 'POST' });
+                const url = `/submit_eval?model_name=${model}&epsilon=${eps}&num_steps=${steps}&step_size=${alpha}`;
+                const response = await fetch(url, { method: 'POST' });
                 const data = await response.json();
 
                 // Show the Job ID
@@ -118,10 +141,13 @@
             // Show "Processing" State immediately
             const statusDiv = document.getElementById('statusResult');
             statusDiv.innerHTML = `
-                <div class="progress-container" style="display:block;">
+                <div style="display: flex; align-items: center;">
                     <div class="loader"></div>
-                    <span><strong>Processing...</strong> The worker is downloading and evaluating the model. This may take a few seconds.</span>
-                </div>
+                    <div>
+                         <strong>Processing...</strong><br>
+                         The worker is downloading and evaluating the model. This may take a few seconds to several minutes depending on the model size and server load.
+                    </div>
+                  </div>
             `;
 
             // Start the Interval (Check every 2 seconds)
