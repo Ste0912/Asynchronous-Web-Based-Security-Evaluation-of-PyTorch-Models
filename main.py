@@ -1,3 +1,4 @@
+import time
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
@@ -18,12 +19,18 @@ async def root():
 @app.post("/submit_eval")
 def submit_eval(
         model_name: str,
+        attack_type: str = "pgd-linf",
         epsilon: float = 0.03137,  # Default to 8/255
         num_steps: int = 10,       # Default to 10
-        step_size: float = 0.00784 # Default to 2/255
+        step_size: float = 0.00784, # Default to 2/255
+        gamma: float = 0.05,        # FMN Default to 0.05
+        perturbation_model: str = "linf"
                 ):
+   
+    #Capture the timestamp of submission (Enqueue Time)
+    submit_time = time.time()
     # Send task to Redis, passing ALL parameters to the worker
-    task = create_dummy_task.delay(model_name, epsilon, num_steps, step_size)
+    task = create_dummy_task.delay(model_name,attack_type, epsilon, num_steps, step_size, submit_time,gamma,perturbation_model)
     return {"job_id": task.id, "message": "Evaluation Task enqueued"}
 
 # GET endpoint to check status
