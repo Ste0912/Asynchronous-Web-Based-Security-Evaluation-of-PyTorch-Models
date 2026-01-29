@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SecML-Torch Robustness Evaluator</title>
@@ -62,19 +63,44 @@
 
         <button onclick="submitJob()">Analyze Model</button>
         <div style="margin-top: 15px; margin-bottom: 15px; border-top: 1px solid #ddd; padding-top: 10px;">
-            <p><strong>Attack Configuration (PGD):</strong></p>
+            <p><strong>Attack Configuration </strong></p>
 
-            <label>Epsilon (Perturbation limit):</label><br>
-            <input type="number" id="epsilon" value="0.03137" step="0.0001" style="width: 100px;">
-            <br><br>
+            <label>Attack Algorithm:</label><br>
+            <select id="attackType" onchange="updateAttackForm()" style="margin-bottom: 15px;">
+                <option value="pgd-linf">PGD (L-Infinity)</option>
+                <option value="pgd-l2">PGD (L2)</option>
+                <option value="pgd-l1">PGD (L1)</option>
+                <option value="fmn">FMN (Fast Minimum Norm)</option>
+            </select>
+            <br>
 
-            <label>Num Steps (Iterations):</label><br>
-            <input type="number" id="numSteps" value="10" step="1" style="width: 100px;">
-            <br><br>
+            <div id="pgdParams" style="display: none;">
+                <label>Epsilon (Perturbation limit):</label><br>
+                <input type="number" id="epsilon" value="0.03137" step="0.0001" style="width: 100px;">
+                <br><br>
+                <label>Num Steps:</label><br>
+                <input type="number" id="pgdSteps" value="50" step="1" style="width: 100px;">
+                <br><br>
+                <label>Step Size (Alpha):</label><br>
+                <input type="number" id="stepSize" value="0.025" step="0.0001" style="width: 100px;">
+            </div>
 
-            <label>Step Size (Alpha):</label><br>
-            <input type="number" id="stepSize" value="0.00784" step="0.0001" style="width: 100px;">
+            <div id="fmnParams" style="display:none;">
+                <label>Num Steps:</label><br>
+                <input type="number" id="fmnSteps" value="100" step="1" style="width: 100px;">
+                <br><br>
+
+                <label>Step Size:</label><br>
+                <input type="number" id="fmnStepSize" value="1.0" step="0.01" style="width: 100px;">
+                <br><br>
+
+                <label>Gamma (eps-ball update):</label><br>
+                <input type="number" id="fmnGamma" value="0.05" step="0.01" style="width: 100px;">
+                <br><br>
+            </div>
         </div>
+
+
 
 
         <div id="submitResult" style="margin-top: 10px; display:none;">
@@ -93,17 +119,73 @@
         <div id="statusResult" style="margin-top: 1rem;"></div>
     </div>
 
+    <div class="card">
+            <h2>3. Comparative Results</h2>
+            <canvas id="resultsChart" width="400" height="200"></canvas>
+            <div id="inspectionArea" style="display:none; margin-top: 30px; border-top: 1px solid #ddd; padding-top: 20px;">
+        <h3>Visual Inspection (Sample 1)</h3>
+        <div style="display: flex; justify-content: space-around; text-align: center;">
+            <div>
+                <h4>Original</h4>
+                <img id="imgOrig" style="width: 150px; border: 1px solid #333;">
+            </div>
+            <div>
+                <h4>Adversarial</h4>
+                <img id="imgAdv" style="width: 150px; border: 1px solid #333;">
+            </div>
+            <div>
+                <h4>Perturbation (Amplified)</h4>
+                <img id="imgNoise" style="width: 150px; border: 1px solid #333;">
+            </div>
+        </div>
+    </div>
+</div>
+
+
+
     <script>
         let pollingInterval = null;
+
+        // 1) Norm-specific default parameters 
+        const PGD_DEFAULTS = {
+            "pgd-linf": { epsilon: 0.03137, steps: 50, stepSize: 0.00784 }, // ~2/255 step
+            "pgd-l2":   { epsilon: 0.5,     steps: 50, stepSize: 0.1     },
+            "pgd-l1":   { epsilon: 12.0,    steps: 50, stepSize: 1.0     }
+        };
+
+        function applyPgdDefaults(attackType) {
+            const d = PGD_DEFAULTS[attackType];
+            if (!d) return;
+
+            document.getElementById('epsilon').value = d.epsilon;
+            document.getElementById('pgdSteps').value = d.steps;
+            document.getElementById('stepSize').value = d.stepSize;
+        }
+
+
+        // Switch visible fields based on dropdown
+        function updateAttackForm() {
+            // Hide all parameter fields initially
+            document.getElementById('pgdParams').style.display = 'none';
+            document.getElementById('fmnParams').style.display = 'none';
+
+            // Get the selected attack type
+            const type = document.getElementById('attackType').value;
+            if (type.startsWith('pgd')) {
+                document.getElementById('pgdParams').style.display = 'block';
+                document.getElementById('fmnParams').style.display = 'none';
+                applyPgdDefaults(type);
+
+            } else if (type === 'fmn') {
+                document.getElementById('pgdParams').style.display = 'none';
+                document.getElementById('fmnParams').style.display = 'block';
+            }
+        }
+
         // FUNCTION 1: Submit the model name to FastAPI
         async function submitJob() {
             const model = document.getElementById('modelName').value;
-
-            // Get values from input boxes
-            const eps = document.getElementById('epsilon').value;
-            const steps = document.getElementById('numSteps').value;
-            const alpha = document.getElementById('stepSize').value;
-
+            const attackType = document.getElementById('attackType').value;
             const resultDiv = document.getElementById('submitResult');
 
             // Reset UI
@@ -111,17 +193,41 @@
             if (pollingInterval) clearInterval(pollingInterval);
 
             try {
-                const url = `/submit_eval?model_name=${model}&epsilon=${eps}&num_steps=${steps}&step_size=${alpha}`;
-                const response = await fetch(url, { method: 'POST' });
-                const data = await response.json();
+                let url = "";
 
-                // Show the Job ID
-                document.getElementById('newJobId').innerText = data.job_id;
-                resultDiv.style.display = 'block';
+                if (attackType.startsWith('pgd')) {
+                    const eps = document.getElementById('epsilon').value;
+                    const steps = document.getElementById('pgdSteps').value;
+                    const alpha = document.getElementById('stepSize').value;
+                    url = `/submit_eval?model_name=${encodeURIComponent(model)}&attack_type=${encodeURIComponent(attackType)}&epsilon=${encodeURIComponent(eps)}&num_steps=${encodeURIComponent(steps)}&step_size=${encodeURIComponent(alpha)}`;
+            } else if (attackType === 'fmn') {
+                // FMN parameters
+                const steps = document.getElementById('fmnSteps').value;
+                const stepSize = document.getElementById('fmnStepSize').value;
+                const gamma = document.getElementById('fmnGamma').value;
+                
+                url = `/submit_eval?model_name=${encodeURIComponent(model)}&attack_type=${encodeURIComponent(attackType)}&num_steps=${encodeURIComponent(steps)}&step_size=${encodeURIComponent(stepSize)}&gamma=${encodeURIComponent(gamma)}&perturbation_model=linf`;
+                } else {
+                    alert(`Unknown attack type: ${attackType}`);
+                    return;
+                }
+
+            const response = await fetch(url, { method: 'POST' });
+            if (!response.ok) {
+                const text = await response.text();
+                throw new Error(`HTTP ${response.status}: ${text}`);
+            }
+            const data = await response.json();
+
+            // Show the Job ID
+            document.getElementById('newJobId').innerText = data.job_id;
+            resultDiv.style.display = 'block';
             } catch (error) {
-                alert("Error submitting job: " + error);
+                alert("Error submitting job: " + error.message);
             }
         }
+
+
 
         // Helper: Move ID and START polling
         function trackCurrentJob() {
@@ -169,21 +275,88 @@
             }, 2000);
         }
 
+
+        // Initialize Chart
+        const ctx = document.getElementById('resultsChart').getContext('2d');
+        const resultsChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: [], // Model Names will go here
+                datasets: [
+                    { label: 'Clean Accuracy', data: [], backgroundColor: '#28a745' },
+                    { label: 'Robust Accuracy', data: [], backgroundColor: '#dc3545' }
+                ]
+            },
+            options: { scales: { y: { beginAtZero: true, max: 100 } } }
+        });
+
+
         // Helper to render the final JSON
         function renderFinalResult(data) {
             const colorClass = data.status === 'SUCCESS' ? 'status-success' : 'status-failed';
+            const res = data.result;
+
             const html = `
                 <h3>Status: <span class="${colorClass}">${data.status}</span></h3>
                 <pre>${JSON.stringify(data.result, null, 2)}</pre>
             `;
             document.getElementById('statusResult').innerHTML = html;
+            // Add data to chart if successful
+            if (data.status === 'SUCCESS') {
+                const timing = res.timing || {};
+
+                const metricsHtml = `
+                <div style="margin-top: 15px; border-top: 1px solid #ccc; padding-top: 10px;">
+                    <h4>Performance Metrics</h4>
+                    <ul>
+                        <li><strong>Queue Wait Time:</strong> ${res.queue_wait_sec}s</li>
+                        <li><strong>Total Duration:</strong> ${timing.total_sec ?? res.duration_sec}s</li>
+                        <li><strong>Model Load:</strong> ${timing.model_load_sec ?? "n/a"}s</li>
+                        <li><strong>Data Load:</strong> ${timing.data_load_sec ?? "n/a"}s</li>
+                        <li><strong>Attack:</strong> ${timing.attack_sec ?? "n/a"}s</li>
+                        <li><strong>Visualization:</strong> ${timing.viz_sec ?? "n/a"}s</li>
+                        <li><strong>Python Peak Alloc:</strong> ${res.py_peak_alloc_mb ?? res.memory_peak_mb} MB</li>
+                        <li><strong>RSS Start/End:</strong> ${res.rss_start_mb ?? "n/a"} / ${res.rss_end_mb ?? "n/a"} MB</li>
+        
+                    </ul>
+                </div>
+                `;
+                document.getElementById('statusResult').insertAdjacentHTML('beforeend', metricsHtml);
+                
+            
+
+                // Parse strings "100.0%" -> 100.0
+                const clean = parseFloat(res.clean_accuracy);
+                const robust = parseFloat(res.robust_accuracy);
+
+                // Add to Chart
+                resultsChart.data.labels.push(res.model_name);
+                resultsChart.data.datasets[0].data.push(clean);
+                resultsChart.data.datasets[1].data.push(robust);
+                resultsChart.update();
+
+                // Render Images 
+            if (res.images) {
+                const area = document.getElementById('inspectionArea');
+                area.style.display = 'block';
+
+                // Inject Base64 strings into img src
+                document.getElementById('imgOrig').src = "data:image/png;base64," + res.images.original;
+                document.getElementById('imgAdv').src = "data:image/png;base64," + res.images.adversarial;
+                document.getElementById('imgNoise').src = "data:image/png;base64," + res.images.noise;
+            }
+            }
         }
 
-        // Manual check button works, but uses the polling function once
+            
+
+        
         function checkStatus() {
             startPolling();
         }
 
+        // Initialize the form on page load
+        updateAttackForm();
     </script>
 </body>
-</html>
+</html>w
