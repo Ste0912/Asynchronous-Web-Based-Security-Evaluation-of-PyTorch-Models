@@ -70,7 +70,9 @@
                 <option value="pgd-linf">PGD (L-Infinity)</option>
                 <option value="pgd-l2">PGD (L2)</option>
                 <option value="pgd-l1">PGD (L1)</option>
-                <option value="fmn">FMN (Fast Minimum Norm)</option>
+                <option value="fmn-linf">FMN (L-Infinity)</option>
+                <option value="fmn-l2">FMN (L2)</option>
+                <option value="fmn-l1">FMN (L1)</option>
             </select>
             <br>
 
@@ -97,6 +99,22 @@
                 <label>Gamma (eps-ball update):</label><br>
                 <input type="number" id="fmnGamma" value="0.05" step="0.01" style="width: 100px;">
                 <br><br>
+
+                <label>Epsilon sweep (for curve):</label><br>
+
+                <label>eps_min</label><br>
+                <input type="number" id="epsMin" value="0.0" step="0.0001" style="width: 100px;">
+                <br><br>
+
+                <label>eps_max</label><br>
+                <input type="number" id="epsMax" value="0.1" step="0.0001" style="width: 100px;">
+                <br><br>
+
+                <label>eps_points</label><br>
+                <input type="number" id="epsPoints" value="21" step="1" style="width: 100px;">
+                <br><br>
+
+                
             </div>
         </div>
 
@@ -122,6 +140,10 @@
     <div class="card">
             <h2>3. Comparative Results</h2>
             <canvas id="resultsChart" width="400" height="200"></canvas>
+            <h3 style="margin-top: 20px;">Security evaluation curve </h3>
+            <canvas id="curveChart" width="400" height="200"></canvas>
+
+
             <div id="inspectionArea" style="display:none; margin-top: 30px; border-top: 1px solid #ddd; padding-top: 20px;">
         <h3>Visual Inspection (Sample 1)</h3>
         <div style="display: flex; justify-content: space-around; text-align: center;">
@@ -146,11 +168,17 @@
     <script>
         let pollingInterval = null;
 
-        // 1) Norm-specific default parameters 
+        // 1) Norm-specific default parameters for PGD
         const PGD_DEFAULTS = {
             "pgd-linf": { epsilon: 0.03137, steps: 50, stepSize: 0.00784 }, // ~2/255 step
             "pgd-l2":   { epsilon: 0.5,     steps: 50, stepSize: 0.1     },
             "pgd-l1":   { epsilon: 12.0,    steps: 50, stepSize: 1.0     }
+        };
+        // 2) Norm-specific default parameters for FMN
+        const FMN_DEFAULTS = {
+            "fmn-linf": { steps: 100, stepSize: 1.0, gamma: 0.05, epsMin: 0.0, epsMax: 0.1, epsPoints: 21 },
+            "fmn-l2":   { steps: 100, stepSize: 1.0, gamma: 0.05, epsMin: 0.0, epsMax: 2.0, epsPoints: 21 },
+            "fmn-l1":   { steps: 100, stepSize: 5.0, gamma: 0.05, epsMin: 0.0, epsMax: 15.0, epsPoints: 41 }
         };
 
         function applyPgdDefaults(attackType) {
@@ -162,6 +190,19 @@
             document.getElementById('stepSize').value = d.stepSize;
         }
 
+        function applyFmnDefaults(attackType) {
+            const d = FMN_DEFAULTS[attackType];
+            if (!d) return;
+
+            document.getElementById('fmnSteps').value = d.steps;
+            document.getElementById('fmnStepSize').value = d.stepSize;
+            document.getElementById('fmnGamma').value = d.gamma;
+            document.getElementById('epsMin').value = d.epsMin;
+            document.getElementById('epsMax').value = d.epsMax;
+            document.getElementById('epsPoints').value = d.epsPoints;
+        
+        
+        }
 
         // Switch visible fields based on dropdown
         function updateAttackForm() {
@@ -174,11 +215,13 @@
             if (type.startsWith('pgd')) {
                 document.getElementById('pgdParams').style.display = 'block';
                 document.getElementById('fmnParams').style.display = 'none';
+                // Apply norm-specific defaults whenever user picks a PGD norm
                 applyPgdDefaults(type);
 
-            } else if (type === 'fmn') {
+            } else if (type.startsWith('fmn'))  {
                 document.getElementById('pgdParams').style.display = 'none';
                 document.getElementById('fmnParams').style.display = 'block';
+                applyFmnDefaults(type);
             }
         }
 
@@ -200,17 +243,21 @@
                     const steps = document.getElementById('pgdSteps').value;
                     const alpha = document.getElementById('stepSize').value;
                     url = `/submit_eval?model_name=${encodeURIComponent(model)}&attack_type=${encodeURIComponent(attackType)}&epsilon=${encodeURIComponent(eps)}&num_steps=${encodeURIComponent(steps)}&step_size=${encodeURIComponent(alpha)}`;
-            } else if (attackType === 'fmn') {
+            } else if (attackType.startsWith('fmn')) {
                 // FMN parameters
                 const steps = document.getElementById('fmnSteps').value;
                 const stepSize = document.getElementById('fmnStepSize').value;
                 const gamma = document.getElementById('fmnGamma').value;
-                
-                url = `/submit_eval?model_name=${encodeURIComponent(model)}&attack_type=${encodeURIComponent(attackType)}&num_steps=${encodeURIComponent(steps)}&step_size=${encodeURIComponent(stepSize)}&gamma=${encodeURIComponent(gamma)}&perturbation_model=linf`;
-                } else {
-                    alert(`Unknown attack type: ${attackType}`);
-                    return;
-                }
+
+                const epsMin = document.getElementById('epsMin').value;
+                const epsMax = document.getElementById('epsMax').value;
+                const epsPoints = document.getElementById('epsPoints').value;
+
+                url = `/submit_eval?model_name=${encodeURIComponent(model)}&attack_type=${encodeURIComponent(attackType)}&num_steps=${encodeURIComponent(steps)}&step_size=${encodeURIComponent(stepSize)}&gamma=${encodeURIComponent(gamma)}&eps_min=${encodeURIComponent(epsMin)}&eps_max=${encodeURIComponent(epsMax)}&eps_points=${encodeURIComponent(epsPoints)}`;
+            } else {
+                alert(`Unknown attack type: ${attackType}`);
+                return;
+            }
 
             const response = await fetch(url, { method: 'POST' });
             if (!response.ok) {
@@ -281,7 +328,7 @@
         const resultsChart = new Chart(ctx, {
             type: 'bar',
             data: {
-                labels: [], // Model Names will go here
+                labels: [], 
                 datasets: [
                     { label: 'Clean Accuracy', data: [], backgroundColor: '#28a745' },
                     { label: 'Robust Accuracy', data: [], backgroundColor: '#dc3545' }
@@ -289,6 +336,24 @@
             },
             options: { scales: { y: { beginAtZero: true, max: 100 } } }
         });
+
+
+        // Initialize Curve Chart (ε vs robust accuracy)
+        const curveCtx = document.getElementById('curveChart').getContext('2d');
+        const curveChart = new Chart(curveCtx, {
+        type: 'line',
+        data: {
+            datasets: []
+        },
+        options: {
+            parsing: false,
+            scales: {
+            x: { type: 'linear', title: { display: true, text: 'Epsilon (ε)' } },
+            y: { beginAtZero: true, max: 100, title: { display: true, text: 'Robust accuracy (%)' } }
+            }
+        }
+        });
+
 
 
         // Helper to render the final JSON
@@ -335,7 +400,27 @@
                 resultsChart.data.datasets[1].data.push(robust);
                 resultsChart.update();
 
-                // Render Images 
+
+                // Add curve if present (FMN)
+                if (res.curve && res.curve.epsilons && res.curve.robust_accuracy) {
+                const eps = res.curve.epsilons;
+                const ra = res.curve.robust_accuracy;
+
+                const points = eps.map((e, i) => ({ x: e, y: ra[i] }));
+
+                curveChart.data.datasets.push({
+                    label: `${res.model_name} | ${res.attack_type}`,
+                    data: points,
+                    tension: 0.1
+                });
+
+                curveChart.update();
+                }
+
+                
+
+
+                // Render Images if they exist
             if (res.images) {
                 const area = document.getElementById('inspectionArea');
                 area.style.display = 'block';
@@ -350,7 +435,7 @@
 
             
 
-        
+        // Manual check button works, but uses the polling function once
         function checkStatus() {
             startPolling();
         }
@@ -359,4 +444,4 @@
         updateAttackForm();
     </script>
 </body>
-</html>w
+</html>
