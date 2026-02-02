@@ -3,11 +3,12 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 from celery.result import AsyncResult
-from worker import create_dummy_task
+from worker import create_task
 
 
 app = FastAPI()
 
+# --- Serve the "static" folder at the "/static" URL ---
 app.mount("/static", StaticFiles(directory="static", html=True), name="static")
 
 #Redirect root URL (/) to the dashboard
@@ -24,19 +25,24 @@ def submit_eval(
         num_steps: int = 10,       # Default to 10
         step_size: float = 0.00784, # Default to 2/255
         gamma: float = 0.05,        # FMN Default to 0.05
-        perturbation_model: str = "linf"
+        perturbation_model: str = "linf",
+        # epsilon sweep params (used by FMN curve; harmless for PGD)
+        eps_min: float = 0.0,
+        eps_max: float = 0.1,
+        eps_points: int = 21
+        
                 ):
    
     #Capture the timestamp of submission (Enqueue Time)
     submit_time = time.time()
     # Send task to Redis, passing ALL parameters to the worker
-    task = create_dummy_task.delay(model_name,attack_type, epsilon, num_steps, step_size, submit_time,gamma,perturbation_model)
+    task = create_task.delay(model_name,attack_type, epsilon, num_steps, step_size, submit_time,gamma,perturbation_model,eps_min, eps_max, eps_points)
     return {"job_id": task.id, "message": "Evaluation Task enqueued"}
 
 # GET endpoint to check status
 @app.get("/job_status/{job_id}")
 def get_status(job_id: str):
-    task_result = AsyncResult(job_id, app=create_dummy_task.app)
+    task_result = AsyncResult(job_id, app=create_task.app)
     return {
         "job_id": job_id,
         "status": task_result.status,
@@ -44,10 +50,10 @@ def get_status(job_id: str):
     }
 
 #Delete endpoint to remove a job
-@app.delete("/delete_job/{job_id}")
-def delete_job(job_id: str):
-    task_result = AsyncResult(job_id, app=create_dummy_task.app)
-    if task_result.state != 'PENDING':
-        task_result.forget()
-    return {"job_id": job_id, "message": "Job deleted"}
+#@app.delete("/delete_job/{job_id}")
+#def delete_job(job_id: str):
+#    task_result = AsyncResult(job_id, app=create_dummy_task.app)
+#    if task_result.state != 'PENDING':
+#        task_result.forget()
+#    return {"job_id": job_id, "message": "Job deleted"}
 
