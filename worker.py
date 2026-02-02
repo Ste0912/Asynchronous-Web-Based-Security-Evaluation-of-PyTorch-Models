@@ -8,6 +8,7 @@ import io
 import os
 import psutil
 import base64
+import math
 import numpy as np
 import h5py
 from PIL import Image
@@ -27,9 +28,25 @@ celery_app = Celery(
     backend="redis://localhost:6379/0"
 )
 
+def batch_lp_norm(delta: torch.Tensor, p_model: str) -> torch.Tensor:
+    """
+    delta: (N, C, H, W)
+    returns: (N,) per-sample norms
+    """
+    flat = delta.view(delta.shape[0], -1).abs()
 
-@celery_app.task(name="create_dummy_task")
-def create_dummy_task(model_name,attack_type, epsilon, num_steps, step_size, submit_time,gamma=0.05,perturbation_model="linf",):
+    if p_model == "linf":
+        return flat.max(dim=1).values
+    elif p_model == "l2":
+        return torch.sqrt((flat ** 2).sum(dim=1))
+    elif p_model == "l1":
+        return flat.sum(dim=1)
+    else:
+        raise ValueError(f"Unsupported perturbation_model: {p_model}")
+
+
+@celery_app.task(name="create_task")
+def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_time,gamma=0.05,perturbation_model="linf",eps_min=0.0, eps_max=0.1, eps_points=21):
     process = psutil.Process(os.getpid())
     rss_start_mb = process.memory_info().rss / (1024 * 1024)
     # Capture the exact time the worker actually starts processing
@@ -39,6 +56,13 @@ def create_dummy_task(model_name,attack_type, epsilon, num_steps, step_size, sub
     # The difference between now (start) and when it was sent (submit)
     queue_wait_seconds = start_time_queue - submit_time
     
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\nWorker: Using device = {device}")
+
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+
+
     # Use monotonic for durations (not affected by clock adjustments)
     t0_total = time.monotonic()
     
@@ -63,9 +87,12 @@ def create_dummy_task(model_name,attack_type, epsilon, num_steps, step_size, sub
         # --- PHASE 1: LOAD MODEL ---
         t0_model = time.monotonic()
         print(f"\n Worker: Downloading/Loading {model_to_load} from RobustBench...")
+       
         # We assume dataset='cifar10' and threat_model='Linf'
         model = load_model(model_name=model_to_load, dataset='cifar10', threat_model='Linf')
         model.eval()
+        model = model.to(device)
+
         t1_model = time.monotonic()
         print("\nWorker: Model loaded successfully.")
     except Exception as e:
@@ -80,7 +107,7 @@ def create_dummy_task(model_name,attack_type, epsilon, num_steps, step_size, sub
         # --- PHASE 2: WRAP MODEL ---
        
         print("\nWorker: Wrapping model with secml-torch...")
-       
+        # BasePytorchClassifier handles the gradient tracking for the attack
         secml_model = BasePytorchClassifier(model)
         print("\nWorker: Model wrapped successfully.")
     except Exception as e:
@@ -96,7 +123,10 @@ def create_dummy_task(model_name,attack_type, epsilon, num_steps, step_size, sub
         t0_data = time.monotonic()
         print("Worker: Loading real CIFAR-10 test images...")
 
-        
+        # We use torchvision to download the official test set.
+        # root='./data': Saves files to a 'data' folder in the project
+        # train=False: We want the TEST set (for evaluation), not training data
+        # transform=ToTensor(): Converts images to PyTorch Tensors [0, 1]
         test_dataset = torchvision.datasets.CIFAR10(
             root='./data',
             train=False,
@@ -115,6 +145,10 @@ def create_dummy_task(model_name,attack_type, epsilon, num_steps, step_size, sub
         # Stack them into a single batch Tensor: Shape (10, 3, 32, 32)
         images = torch.stack(images_list)
         true_labels = torch.tensor(labels_list)
+        images = images.to(device)  
+        true_labels = true_labels.to(device)
+
+
         t1_data = time.monotonic()
         print(f"\nWorker: Batch created. True Labels: {[cifar10_labels[l] for l in true_labels]}")
 
@@ -181,33 +215,33 @@ def create_dummy_task(model_name,attack_type, epsilon, num_steps, step_size, sub
                 )
                 pass
 
-        elif attack_type == "fmn":
-            # TEMP DEBUG: log the exact args used to build FMN
-            print(
-                "[DEBUG][FMN] Building FMN with params:",
-                {
-                    "perturbation_model": perturbation_model,
-                    "num_steps": num_steps,
-                    "step_size": step_size,
-                    "gamma": gamma,
-                    "types": {
-                        "perturbation_model": type(perturbation_model).__name__,
-                        "num_steps": type(num_steps).__name__,
-                        "step_size": type(step_size).__name__,
-                        "gamma": type(gamma).__name__,
-                    },
-                },
-                flush=True,
-            )
-
-            # Instantiate FMN Attack
-           
-            attack = FMN(
-                perturbation_model=str(perturbation_model),  # FMN typically uses Linf
-                num_steps=int(num_steps),
-                step_size=float(step_size),
-                gamma=float(gamma)
-            )
+        elif attack_type.startswith("fmn"):
+            # Extract 'linf', 'l2', or 'l1' from string 'fmn-linf'
+            p_model = attack_type.split("-")[1]
+            if(p_model == "linf"):
+                # FMN L-infinity Attack
+                attack = FMN(
+                    perturbation_model="linf",
+                    num_steps=int(num_steps),
+                    step_size=float(step_size),
+                    gamma=float(gamma)
+                )
+            elif(p_model == "l2"):
+                # FMN L2 Attack
+                attack = FMN(
+                    perturbation_model="l2",
+                    num_steps=int(num_steps),
+                    step_size=float(step_size),
+                    gamma=float(gamma)
+                )
+            elif(p_model == "l1"):
+                # FMN L1 Attack
+                attack = FMN(
+                    perturbation_model="l1",
+                    num_steps=int(num_steps),
+                    step_size=float(step_size),
+                    gamma=float(gamma)
+                )
 
         else:
             raise ValueError(f"Unknown attack type: {attack_type}")
@@ -216,7 +250,7 @@ def create_dummy_task(model_name,attack_type, epsilon, num_steps, step_size, sub
 
 
         # --- Create a DataLoader for the Attack ---
-       
+        # The library expects an iterable that yields (image_batch, label_batch)
         dataset = TensorDataset(images, true_labels)
         attack_loader = DataLoader(dataset, batch_size=batch_size)
 
@@ -229,7 +263,7 @@ def create_dummy_task(model_name,attack_type, epsilon, num_steps, step_size, sub
         # Since we only have 1 batch, we just grab the first item
         adversarial_images, _ = next(iter(adv_loader))
         t1_attack = time.monotonic()
-        print("\n Worker: PGD Attack completed.")
+        print(f"\n Worker: {attack_type} Attack completed.")
     except Exception as e:
         print(f"Worker Error during PGD attack: {e}")
         traceback.print_exc()
@@ -241,12 +275,63 @@ def create_dummy_task(model_name,attack_type, epsilon, num_steps, step_size, sub
         # --- PHASE 6: EVALUATE ROBUSTNESS ---
         print("\n Worker: Evaluating attack impact...")
 
+        
         # Get predictions on the attacked images
         adv_preds = secml_model.predict(adversarial_images)
 
-        # Robust Accuracy: How many still match the TRUE label?
-        robust_correct = (adv_preds == true_labels).sum().item()
-        robust_accuracy = (robust_correct / batch_size) * 100
+        curve_payload = None  # default: no curve
+
+        # --- If FMN: build robust accuracy curve vs epsilon ---
+        if attack_type.startswith("fmn"):
+            # which norm? "fmn-linf" -> "linf"
+            p_model = attack_type.split("-")[1]
+
+            # Clean correctness mask (robustness is usually counted only for clean-correct samples)
+            clean_correct_mask = (clean_preds == true_labels)          # (N,)
+
+            # Attack success means adv prediction != true label
+            attack_success_mask = (adv_preds != true_labels)           # (N,)
+
+            # Compute per-sample perturbation size ||adv - orig||_p
+            delta = (adversarial_images - images).detach()
+            dists = batch_lp_norm(delta, p_model)                      # (N,)
+
+            # If attack failed, treat required distance as +inf (robust for all eps)
+            inf = torch.tensor(float("inf"), device=dists.device)
+            effective_dists = torch.where(attack_success_mask, dists, inf)
+
+            # Epsilon grid
+            eps_grid = np.linspace(float(eps_min), float(eps_max), int(eps_points)).tolist()
+
+            # Robust accuracy curve (percentage over ALL samples, matching your current style)
+            rob_curve = []
+            for eps in eps_grid:
+                eps_t = torch.tensor(eps, device=effective_dists.device)
+                robust_mask = clean_correct_mask & (effective_dists > eps_t)
+                robust_acc = (robust_mask.sum().item() / batch_size) * 100.0
+                rob_curve.append(round(robust_acc, 3))
+
+            # Define "robust_accuracy" as the last point (at eps_max)
+            robust_accuracy = rob_curve[-1]
+
+            curve_payload = {
+                "epsilons": eps_grid,
+                "robust_accuracy": rob_curve,
+                "perturbation_model": p_model,
+                "eps_min": float(eps_min),
+                "eps_max": float(eps_max),
+                "eps_points": int(eps_points),
+            }
+
+        else:
+            # --- Non-FMN ( original single robust accuracy) ---
+            robust_correct = (adv_preds == true_labels).sum().item()
+            robust_accuracy = (robust_correct / batch_size) * 100.0
+
+                
+       
+
+
 
         # --- Performance Metrics Calculation ---
         end_time = time.time()
@@ -315,6 +400,7 @@ def create_dummy_task(model_name,attack_type, epsilon, num_steps, step_size, sub
             "model_name": model_name,
             "clean_accuracy": f"{clean_acc_percent:.1f}%",
             "robust_accuracy": f"{robust_accuracy:.1f}%",
+            "curve": curve_payload,
             "true_labels": true_names,
             "adversarial_labels": adv_names,
             "queue_wait_sec": round(queue_wait_seconds, 4),
