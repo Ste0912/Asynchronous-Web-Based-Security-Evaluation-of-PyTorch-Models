@@ -19,7 +19,9 @@ from secmlt.models.pytorch.base_pytorch_nn import BasePytorchClassifier
 from secmlt.adv.evasion.pgd import PGD
 from secmlt.adv.evasion.fmn import FMN
 from torch.utils.data import Dataset
-from dataset_loader import H5Dataset
+#from dataset_loader import H5Dataset
+from robustbench_utils import get_robustbench_point
+
 
 # Configure Celery to use the running Redis server
 celery_app = Celery(
@@ -88,7 +90,7 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
         t0_model = time.monotonic()
         print(f"\n Worker: Downloading/Loading {model_to_load} from RobustBench...")
        
-        # We assume dataset='cifar10' and threat_model='Linf'
+        # dataset='cifar10' and threat_model='Linf'
         model = load_model(model_name=model_to_load, dataset='cifar10', threat_model='Linf')
         model.eval()
         model = model.to(device)
@@ -123,10 +125,7 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
         t0_data = time.monotonic()
         print("Worker: Loading real CIFAR-10 test images...")
 
-        # We use torchvision to download the official test set.
-        # root='./data': Saves files to a 'data' folder in the project
-        # train=False: We want the TEST set (for evaluation), not training data
-        # transform=ToTensor(): Converts images to PyTorch Tensors [0, 1]
+        
         test_dataset = torchvision.datasets.CIFAR10(
             root='./data',
             train=False,
@@ -183,6 +182,7 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
         print(f"\n Worker: Running {attack_type} Attack ")
 
         attack = None
+        rb_point = None
 
         # SELECT ATTACK
         if attack_type.startswith("pgd"):
@@ -218,6 +218,9 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
         elif attack_type.startswith("fmn"):
             # Extract 'linf', 'l2', or 'l1' from string 'fmn-linf'
             p_model = attack_type.split("-")[1]
+            rb_point = get_robustbench_point(model_to_load, p_model)
+
+
             if(p_model == "linf"):
                 # FMN L-infinity Attack
                 attack = FMN(
@@ -250,7 +253,6 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
 
 
         # --- Create a DataLoader for the Attack ---
-        # The library expects an iterable that yields (image_batch, label_batch)
         dataset = TensorDataset(images, true_labels)
         attack_loader = DataLoader(dataset, batch_size=batch_size)
 
@@ -300,6 +302,27 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
             inf = torch.tensor(float("inf"), device=dists.device)
             effective_dists = torch.where(attack_success_mask, dists, inf)
 
+
+            # JSON cannot represent inf; replace with a large sentinel
+            INF_SENTINEL = 1e9
+            effective_dists_json = effective_dists.detach().cpu().numpy()
+            effective_dists_json = np.where(np.isinf(effective_dists_json), INF_SENTINEL, effective_dists_json).tolist()
+
+            clean_correct_json = clean_correct_mask.detach().cpu().to(torch.int).numpy().tolist()
+
+            curve_detail = {
+                "sample_indices": list(range(batch_size)),   # matches your selected indices = first 10
+                "clean_correct_mask": clean_correct_json,    # 0/1
+                "effective_dists": effective_dists_json,     # float list, inf replaced
+                "inf_sentinel": INF_SENTINEL
+            }
+
+
+
+
+
+
+
             # Epsilon grid
             eps_grid = np.linspace(float(eps_min), float(eps_max), int(eps_points)).tolist()
 
@@ -321,6 +344,7 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
                 "eps_min": float(eps_min),
                 "eps_max": float(eps_max),
                 "eps_points": int(eps_points),
+                "detail": curve_detail
             }
 
         else:
@@ -414,6 +438,7 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
             "epsilon": epsilon,
             "num_steps": num_steps,
             "step_size": step_size,
+            "robustbench_point": rb_point,
             # Add images to the response
             "images": {
                 "original": img_orig_b64,
