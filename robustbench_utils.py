@@ -1,10 +1,8 @@
-
-
 RB_MANUAL = {
     # model_name: { norm: robust_accuracy_percent }
     "Carmon2019Unlabeled": {
-        "linf": 59.53,  # TODO put real value from RobustBench
-        "l2":   0.0,  # optional
+        "linf": 59.53,  
+        "l2":   0.0,  
     },
     "Rice2020Overfitting": {
         "linf": 53.42,
@@ -31,7 +29,7 @@ RB_MANUAL = {
         "l2":   0.0,
     }
 
-
+    
 }
 
 def get_robustbench_point(model_name: str, p_model: str):
@@ -55,7 +53,7 @@ def get_robustbench_point(model_name: str, p_model: str):
 
     return {
         "epsilon": float(rb_epsilon),
-        "robust_accuracy": float(rb_rob),  
+        "robust_accuracy": float(rb_rob),  # already in percent
         "threat_model": threat_model,
         "source": "manual"
     }
