@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Job History</title>
+  <style>
+    body { font-family: sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #ddd; padding: 10px; vertical-align: top; }
+    th { background: #f3f3f3; text-align: left; }
+    .status-pending { color: orange; font-weight: bold; }
+    .status-success { color: green; font-weight: bold; }
+    .status-failed { color: red; font-weight: bold; }
+    code { white-space: pre-wrap; }
+    .highlight { outline: 3px solid #007bff; }
+    .button { display:inline-block; margin-bottom: 14px; text-decoration:none; padding:8px 12px; background:#007bff; color:white; border-radius:6px; }
+  </style>
+</head>
+<body>
+  <h1>Registry of Attack</h1>
+  <a id="backToDashboard" class="button" href="/static/index.html">← Back to Dashboard</a>
+  <button id="viewSelectedCurves" class="button">View selected curve(s)</button>
+  <button id="clearSelection" class="button" style="background:#6c757d;">Clear</button>
+  <span id="selInfo" style="margin-left:10px;"></span>
+
+
+  <p>This table includes all attacks    . Status updates automatically.</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Job_id</th>
+        <th>Model</th>
+        <th>Attack</th>
+        <th>Hyperparameters of attack</th>
+        <th>Status</th>
+        <th>Select (curve)</th>
+      </tr>
+    </thead>
+    <tbody id="jobsBody"></tbody>
+  </table>
+
+  <script>
+
+  const selected = new Set();
+
+  function eligible(j) {
+    return j.status === "success" && typeof j.attack === "string" && j.attack.startsWith("fmn-");
+  }
+
+  function normFromAttack(a) { return a.split("-")[1]; }
+
+  function updateSelInfo() {
+    document.getElementById("selInfo").textContent = `Selected: ${selected.size}`;
+  }
+
+
+
+    function getQueryParam(name) {
+      const url = new URL(window.location.href);
+      return url.searchParams.get(name);
+    }
+
+    // Keep the current job_id when going back to the dashboard
+    const back = document.getElementById("backToDashboard");
+    const currentJobId = getQueryParam("job_id");
+    if (currentJobId) {
+    back.href = `/static/index.html?job_id=${encodeURIComponent(currentJobId)}`;
+    }
+
+  
+
+    function normFromAttack(a) {
+      // "fmn-linf" -> "linf"
+      return a.split("-")[1];
+    }
+
+function updateSelInfo() {
+  document.getElementById("selInfo").textContent = `Selected: ${selected.size}`;
+}
+
+
+    function statusClass(s) {
+      if (s === "success") return "status-success";
+      if (s === "failed") return "status-failed";
+      return "status-pending";
+    }
+
+    function renderJobs(jobs) {
+      const highlightId = getQueryParam("job_id");
+      const tbody = document.getElementById("jobsBody");
+      tbody.innerHTML = "";
+
+      for (const j of jobs) {
+        const tr = document.createElement("tr");
+        if (highlightId && j.job_id === highlightId) tr.classList.add("highlight");
+
+        const isOk = eligible(j);
+        const checked = selected.has(j.job_id) ? "checked" : "";
+        const disabled = isOk ? "" : "disabled";
+        const hp = j.hyperparameters_of_attack || {};
+
+
+          
+
+        tr.innerHTML = `
+          <td style="font-family: monospace;">${j.job_id}</td>
+          <td>${j.model}</td>
+          <td>${j.attack}</td>
+          <td><code>${escapeHtml(JSON.stringify(hp, null, 2))}</code></td>
+          <td class="${statusClass(j.status)}">${j.status}</td>
+          <td>
+                <input type="checkbox" class="pick"
+                  data-jobid="${j.job_id}"
+                  data-model="${j.model}"
+                  data-attack="${j.attack}"
+                  data-epsmin="$hp.eps_min ?? ""}"
+                  data-epsmax="${hp.eps_max ?? ""}"
+                  data-epspoints="${hp.eps_points ?? ""}"
+                  ${checked} ${disabled}
+                />
+            </td>
+        
+          `;
+        tbody.appendChild(tr);
+
+        const cb = tr.querySelector(".pick");
+        if (cb) {
+          cb.addEventListener("change", (e) => {
+            const id = e.target.dataset.jobid;
+            if (e.target.checked) selected.add(id);
+            else selected.delete(id);
+            updateSelInfo();
+          });
+      }
+    }
+    updateSelInfo();
+  }
+
+    function escapeHtml(str) {
+      return str
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    async function refreshTable() {
+      const res = await fetch("/jobs");
+      const data = await res.json();
+      renderJobs(data.jobs || []);
+    }
+
+
+ 
+    document.getElementById("clearSelection").addEventListener("click", () => {
+      selected.clear();
+      updateSelInfo();
+      refreshTable(); // re-render with all checkboxes cleared
+    });
+
+    document.getElementById("viewSelectedCurves").addEventListener("click", () => {
+      const ids = Array.from(selected);
+      if (ids.length === 0) {
+        alert("Select at least one SUCCESS FMN job.");
+        return;
+      }
+
+      const selectedCbs = Array.from(document.querySelectorAll(".pick"))
+        .filter(cb => selected.has(cb.dataset.jobid));
+
+      const models = new Set(selectedCbs.map(cb => cb.dataset.model));
+      if (models.size !== 1) {
+        alert("Select jobs of the same model.");
+        return;
+      }
+
+      const norms = new Set(selectedCbs.map(cb => normFromAttack(cb.dataset.attack)));
+      if (norms.size !== 1) {
+        alert("Aggregate only FMN jobs with the same norm (e.g., all fmn-linf).");
+        return;
+      }
+
+      const sweepKey = (cb) => `${cb.dataset.epsmin}|${cb.dataset.epsmax}|${cb.dataset.epspoints}`;
+      const sweeps = new Set(selectedCbs.map(sweepKey));
+      if (sweeps.size !== 1) {
+        alert("Use the same eps_min/eps_max/eps_points for exact aggregation.");
+        return;
+      }
+
+      const mode = (ids.length === 1) ? "single" : "ensemble";
+      window.location.href = `/static/index.html?curve_jobs=${encodeURIComponent(ids.join(","))}&curve_mode=${mode}`;
+    });
+   
+
+
+    // initial + poll
+    refreshTable();
+    setInterval(refreshTable, 2000);
+  </script>
+</body>
+</html>
