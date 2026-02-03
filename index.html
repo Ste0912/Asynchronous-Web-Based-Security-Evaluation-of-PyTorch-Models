@@ -168,6 +168,61 @@
     <script>
         let pollingInterval = null;
 
+
+
+        // Prevent adding the same job multiple times (rehydrate + polling)
+        const addedJobIds = new Set();
+
+        function addResultToCharts(jobId, res) {
+        if (!res) return;
+        if (addedJobIds.has(jobId)) return;
+        addedJobIds.add(jobId);
+
+        // Make x-axis labels unique per run (model + attack), otherwise it’s confusing
+        const runLabel = `${res.model_name} | ${res.attack_type}`;
+
+        const clean = parseFloat(res.clean_accuracy);   // "100.0%" -> 100
+        const robust = parseFloat(res.robust_accuracy);
+
+        // --- Bar chart ---
+        resultsChart.data.labels.push(runLabel);
+        resultsChart.data.datasets[0].data.push(clean);
+        resultsChart.data.datasets[1].data.push(robust);
+        resultsChart.update();
+
+        // --- Curve chart (FMN only) ---
+        if (res.curve && res.curve.epsilons && res.curve.robust_accuracy) {
+            const eps = res.curve.epsilons;
+            const ra = res.curve.robust_accuracy;
+            const points = eps.map((e, i) => ({ x: e, y: ra[i] }));
+
+            curveChart.data.datasets.push({
+            label: runLabel,
+            data: points,
+            tension: 0.1
+            });
+
+            // Optional: RobustBench point if present
+            if (res.robustbench_point && res.robustbench_point.epsilon != null && res.robustbench_point.robust_accuracy != null) {
+            const rb = res.robustbench_point;
+            curveChart.data.datasets.push({
+                label: `${res.model_name} | RobustBench (${rb.threat_model})`,
+                type: 'scatter',
+                data: [{ x: rb.epsilon, y: rb.robust_accuracy }],
+                showLine: false,
+                pointRadius: 7,
+                pointHoverRadius: 10
+            });
+            }
+
+            curveChart.update();
+        }
+        }
+
+
+
+
+
         // 1) Norm-specific default parameters for PGD
         const PGD_DEFAULTS = {
             "pgd-linf": { epsilon: 0.03137, steps: 50, stepSize: 0.00784 }, // ~2/255 step
@@ -225,6 +280,69 @@
             }
         }
 
+
+    
+        function getQueryParam(name) {
+            const url = new URL(window.location.href);
+            return url.searchParams.get(name);
+            }
+
+        
+
+
+        async function resumeJobIfAny() {
+            const id = getQueryParam("job_id") || localStorage.getItem("last_job_id");
+            if (!id) return;
+            // Restore the "Job Enqueued!" box so Track this Job is visible and works
+            document.getElementById('newJobId').innerText = id;
+            document.getElementById('submitResult').style.display = 'block';
+
+
+            // Put it in the input box (so the UI is consistent)
+            document.getElementById("jobIdInput").value = id;
+
+            // Check current state once
+            try {
+                const response = await fetch(`/job_status/${id}`);
+                const data = await response.json();
+
+                // If finished -> render immediately
+                if (data.status === 'SUCCESS' || data.status === 'FAILURE' || data.status === 'REVOKED') {
+                renderFinalResult(data);
+                } else {
+                // Otherwise -> start polling (this shows your spinner + message)
+                startPolling(id);
+                }
+            } catch (e) {
+                console.error("resumeJobIfAny error:", e);
+            }
+            }
+
+
+        async function rehydrateChartsFromServerJobs() {
+            try {
+                const resp = await fetch("/jobs");
+                const data = await resp.json();
+                const jobs = data.jobs || [];
+
+                // Only completed jobs
+                const successJobs = jobs.filter(j => j.status === "success");
+
+                // Load results for each successful job and add to charts
+                await Promise.all(successJobs.map(async (j) => {
+                const r = await fetch(`/job_status/${j.job_id}`);
+                const s = await r.json();
+                if (s.status === "SUCCESS" && s.result) {
+                    addResultToCharts(j.job_id, s.result);
+                }
+                }));
+            } catch (e) {
+                console.error("rehydrateChartsFromServerJobs error:", e);
+            }
+            }
+
+
+
         // FUNCTION 1: Submit the model name to FastAPI
         async function submitJob() {
             const model = document.getElementById('modelName').value;
@@ -269,6 +387,11 @@
             // Show the Job ID
             document.getElementById('newJobId').innerText = data.job_id;
             resultDiv.style.display = 'block';
+            // NEW: persist last job id
+            localStorage.setItem("last_job_id", data.job_id);
+            // Keep URL aligned with the latest job (no reload)
+            history.replaceState(null, "", `/static/index.html?job_id=${encodeURIComponent(data.job_id)}`);
+
             } catch (error) {
                 alert("Error submitting job: " + error.message);
             }
@@ -280,6 +403,7 @@
         function trackCurrentJob() {
             const id = document.getElementById('newJobId').innerText;
             document.getElementById('jobIdInput').value = id;
+            localStorage.setItem("last_job_id", id);
             startPolling(id); // Starts automation
         }
 
@@ -328,7 +452,7 @@
         const resultsChart = new Chart(ctx, {
             type: 'bar',
             data: {
-                labels: [], 
+                labels: [], // Model Names will go here
                 datasets: [
                     { label: 'Clean Accuracy', data: [], backgroundColor: '#28a745' },
                     { label: 'Robust Accuracy', data: [], backgroundColor: '#dc3545' }
@@ -353,6 +477,102 @@
             }
         }
         });
+
+
+        function computeCurveFromDistances(epsGrid, cleanCorrectMask01, effectiveDists) {
+            const N = cleanCorrectMask01.length;
+            const robustAcc = [];
+
+            for (const eps of epsGrid) {
+                let robustCount = 0;
+                for (let i = 0; i < N; i++) {
+                const cleanOk = cleanCorrectMask01[i] === 1;
+                const robust = cleanOk && (effectiveDists[i] > eps);
+                if (robust) robustCount += 1;
+                }
+                robustAcc.push(Math.round((robustCount / N) * 100000) / 1000); // percent, 3 decimals
+            }
+            return robustAcc;
+            }
+
+
+            async function loadExactEnsembleCurve(jobIds) {
+                const payloads = await Promise.all(jobIds.map(async (id) => {
+                    const r = await fetch(`/job_status/${id}`);
+                    const s = await r.json();
+                    if (s.status !== "SUCCESS" || !s.result || !s.result.curve || !s.result.curve.detail) return null;
+                    return { id, res: s.result };
+                }));
+
+                const jobs = payloads.filter(Boolean);
+                if (jobs.length === 0) {
+                    alert("No SUCCESS FMN jobs with curve.detail found.");
+                    return;
+                }
+
+                // --- Validate: FMN only, same model, same norm ---
+                const modelSet = new Set(jobs.map(j => j.res.model_name));
+                if (modelSet.size !== 1) {
+                    alert("Selected jobs must refer to the same model.");
+                    return;
+                }
+
+                const attackSet = new Set(jobs.map(j => j.res.attack_type));
+                for (const a of attackSet) {
+                    if (!a.startsWith("fmn-")) {
+                    alert("You can compute an ensemble only for FMN jobs.");
+                    return;
+                    }
+                }
+
+                const normSet = new Set(jobs.map(j => j.res.curve.perturbation_model));
+                if (normSet.size !== 1) {
+                    alert("Selected FMN jobs must have the same norm (linf OR l2 OR l1).");
+                    return;
+                }
+
+                // --- Validate same samples and eps grid (recommended for clarity) ---
+                const base = jobs[0].res;
+                const baseIdx = (base.curve.detail.sample_indices || []).join(",");
+                const baseEps = base.curve.epsilons.map(Number);
+
+                for (const j of jobs) {
+                    const idx = (j.res.curve.detail.sample_indices || []).join(",");
+                    if (idx !== baseIdx) {
+                    alert("Selected jobs were computed on different samples; cannot aggregate exactly.");
+                    return;
+                    }
+                    const eps = j.res.curve.epsilons.map(Number);
+                    if (eps.length !== baseEps.length || eps.some((v, k) => Math.abs(v - baseEps[k]) > 1e-12)) {
+                    alert("Selected jobs have different epsilon grids. Use the same eps_min/eps_max/eps_points.");
+                    return;
+                    }
+                }
+
+                // --- Build ensemble per-sample distances: min across jobs ---
+                const N = base.curve.detail.effective_dists.length;
+                const cleanMask = base.curve.detail.clean_correct_mask; // 0/1 list
+
+                const ensembleDists = new Array(N).fill(Number.POSITIVE_INFINITY);
+                for (const j of jobs) {
+                    const d = j.res.curve.detail.effective_dists.map(Number);
+                    for (let i = 0; i < N; i++) {
+                    ensembleDists[i] = Math.min(ensembleDists[i], d[i]);
+                    }
+                }
+
+                // --- Compute exact ensemble curve ---
+                const ensembleRA = computeCurveFromDistances(baseEps, cleanMask, ensembleDists);
+
+                // --- Render ONLY the ensemble curve dataset ---
+                curveChart.data.datasets = [{
+                    label: `Exact Ensemble (min per-sample) | ${base.model_name} | ${base.attack_type.split("-")[1]} | n=${jobs.length}`,
+                    data: baseEps.map((e, i) => ({ x: e, y: ensembleRA[i] })),
+                    tension: 0.1
+                }];
+                curveChart.update();
+                }
+
 
 
 
@@ -395,29 +615,8 @@
                 const robust = parseFloat(res.robust_accuracy);
 
                 // Add to Chart
-                resultsChart.data.labels.push(res.model_name);
-                resultsChart.data.datasets[0].data.push(clean);
-                resultsChart.data.datasets[1].data.push(robust);
-                resultsChart.update();
+                addResultToCharts(data.job_id, res);
 
-
-                // Add curve if present (FMN)
-                if (res.curve && res.curve.epsilons && res.curve.robust_accuracy) {
-                const eps = res.curve.epsilons;
-                const ra = res.curve.robust_accuracy;
-
-                const points = eps.map((e, i) => ({ x: e, y: ra[i] }));
-
-                curveChart.data.datasets.push({
-                    label: `${res.model_name} | ${res.attack_type}`,
-                    data: points,
-                    tension: 0.1
-                });
-
-                curveChart.update();
-                }
-
-                
 
 
                 // Render Images if they exist
@@ -437,11 +636,50 @@
 
         // Manual check button works, but uses the polling function once
         function checkStatus() {
-            startPolling();
+            const id = document.getElementById('jobIdInput').value.trim();
+            if (id) {
+                window.location.href = `/static/jobs.html?job_id=${encodeURIComponent(id)}`;
+            } else {
+                window.location.href = `/static/jobs.html`;
+            }
         }
 
+
         // Initialize the form on page load
+        (async () => {
         updateAttackForm();
+
+        const curveJobsParam = getQueryParam("curve_jobs");
+        const curveMode = getQueryParam("curve_mode");
+
+        if (curveJobsParam) {
+            const ids = curveJobsParam.split(",").map(s => s.trim()).filter(Boolean);
+
+            // clear existing curves and show only selected/ensemble result
+            curveChart.data.datasets = [];
+            curveChart.update();
+
+            if (ids.length === 1) {
+            // show that single curve normally via job_status -> addResultToCharts
+            const r = await fetch(`/job_status/${ids[0]}`);
+            const s = await r.json();
+            if (s.status === "SUCCESS" && s.result) {
+                // avoid also adding to bar chart if you want: comment out if undesired
+                addResultToCharts(ids[0], s.result);
+            }
+            } else {
+            // exact ensemble
+            await loadExactEnsembleCurve(ids);
+            }
+        } else {
+            rehydrateChartsFromServerJobs();
+        }
+
+        resumeJobIfAny();
+        })();
+
+
+
     </script>
 </body>
 </html>
