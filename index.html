@@ -100,6 +100,24 @@
                 <input type="number" id="fmnGamma" value="0.05" step="0.01" style="width: 100px;">
                 <br><br>
 
+
+                <label>Target class (optional):</label><br>
+                <select id="fmnTarget" style="margin-bottom: 15px; width: 220px;">
+                <option value="">None (untargeted)</option>
+                <option value="0">0 - airplane</option>
+                <option value="1">1 - automobile</option>
+                <option value="2">2 - bird</option>
+                <option value="3">3 - cat</option>
+                <option value="4">4 - deer</option>
+                <option value="5">5 - dog</option>
+                <option value="6">6 - frog</option>
+                <option value="7">7 - horse</option>
+                <option value="8">8 - ship</option>
+                <option value="9">9 - truck</option>
+                </select>
+                <br><br>
+
+
                 <label>Epsilon sweep (for curve):</label><br>
 
                 <label>eps_min</label><br>
@@ -142,6 +160,10 @@
             <canvas id="resultsChart" width="400" height="200"></canvas>
             <h3 style="margin-top: 20px;">Security evaluation curve </h3>
             <canvas id="curveChart" width="400" height="200"></canvas>
+            <div id="ensembleMetrics" style="display:none; margin-top: 16px; border-top: 1px solid #ddd; padding-top: 12px;">
+            <h4>Ensemble metrics</h4>
+            <div id="ensembleMetricsContent"></div>
+            </div>
 
 
             <div id="inspectionArea" style="display:none; margin-top: 30px; border-top: 1px solid #ddd; padding-top: 20px;">
@@ -167,7 +189,7 @@
 
     <script>
         let pollingInterval = null;
-
+        let ensembleCsvData = "";
 
 
         // Prevent adding the same job multiple times (rehydrate + polling)
@@ -179,7 +201,11 @@
         addedJobIds.add(jobId);
 
         // Make x-axis labels unique per run (model + attack), otherwise it’s confusing
-        const runLabel = `${res.model_name} | ${res.attack_type}`;
+
+        const tgt = (res.fmn_target === null || res.fmn_target === undefined) ? "None" : res.fmn_target;
+        const runLabel = `${res.model_name} | ${res.attack_type} | tgt=${tgt} | steps=${res.num_steps} | gamma=${res.gamma ?? "n/a"}`;
+
+
 
         const clean = parseFloat(res.clean_accuracy);   // "100.0%" -> 100
         const robust = parseFloat(res.robust_accuracy);
@@ -298,7 +324,6 @@
             document.getElementById('submitResult').style.display = 'block';
 
 
-            // Put it in the input box (so the UI is consistent)
             document.getElementById("jobIdInput").value = id;
 
             // Check current state once
@@ -371,7 +396,27 @@
                 const epsMax = document.getElementById('epsMax').value;
                 const epsPoints = document.getElementById('epsPoints').value;
 
-                url = `/submit_eval?model_name=${encodeURIComponent(model)}&attack_type=${encodeURIComponent(attackType)}&num_steps=${encodeURIComponent(steps)}&step_size=${encodeURIComponent(stepSize)}&gamma=${encodeURIComponent(gamma)}&eps_min=${encodeURIComponent(epsMin)}&eps_max=${encodeURIComponent(epsMax)}&eps_points=${encodeURIComponent(epsPoints)}`;
+                const targetVal = document.getElementById('fmnTarget').value; // "" means None
+
+                
+                url = `/submit_eval?model_name=${encodeURIComponent(model)}`
+                    + `&attack_type=${encodeURIComponent(attackType)}`
+                    + `&num_steps=${encodeURIComponent(steps)}`
+                    + `&step_size=${encodeURIComponent(stepSize)}`
+                    + `&gamma=${encodeURIComponent(gamma)}`
+                    + `&eps_min=${encodeURIComponent(epsMin)}`
+                    + `&eps_max=${encodeURIComponent(epsMax)}`
+                    + `&eps_points=${encodeURIComponent(epsPoints)}`;
+
+
+
+                 // only add if user selected a target
+                if (targetVal !== "") {
+                    url += `&target=${encodeURIComponent(targetVal)}`;
+
+                }
+
+
             } else {
                 alert(`Unknown attack type: ${attackType}`);
                 return;
@@ -536,43 +581,323 @@
                 const baseIdx = (base.curve.detail.sample_indices || []).join(",");
                 const baseEps = base.curve.epsilons.map(Number);
 
-                for (const j of jobs) {
-                    const idx = (j.res.curve.detail.sample_indices || []).join(",");
-                    if (idx !== baseIdx) {
-                    alert("Selected jobs were computed on different samples; cannot aggregate exactly.");
-                    return;
-                    }
-                    const eps = j.res.curve.epsilons.map(Number);
-                    if (eps.length !== baseEps.length || eps.some((v, k) => Math.abs(v - baseEps[k]) > 1e-12)) {
-                    alert("Selected jobs have different epsilon grids. Use the same eps_min/eps_max/eps_points.");
-                    return;
-                    }
-                }
-
-                // --- Build ensemble per-sample distances: min across jobs ---
-                const N = base.curve.detail.effective_dists.length;
                 const cleanMask = base.curve.detail.clean_correct_mask; // 0/1 list
+                const N = cleanMask.length;
 
-                const ensembleDists = new Array(N).fill(Number.POSITIVE_INFINITY);
+                // validation: same eps grid + same sample set + same masks + same dist length ---
+                function sameEpsGrid(a, b, tol = 1e-12) {
+                    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+                    if (a.length !== b.length) return false;
+                    for (let i = 0; i < a.length; i++) {
+                        if (Math.abs(Number(a[i]) - Number(b[i])) > tol) return false;
+                    }
+                    return true;
+                }
+
+                const baseSampleIdx = base.curve.detail.sample_indices || null;
+
                 for (const j of jobs) {
-                    const d = j.res.curve.detail.effective_dists.map(Number);
+                    const r = j.res;
+
+                    // eps grid must match
+                    const epsJ = r.curve.epsilons.map(Number);
+                    if (!sameEpsGrid(baseEps, epsJ)) {
+                        alert("Selected jobs must have the SAME epsilon grid (curve.epsilons).");
+                        return;
+                    }
+
+                    // clean_correct_mask must match length + values (otherwise curves are not comparable)
+                    const cm = r.curve.detail.clean_correct_mask;
+                    if (!Array.isArray(cm) || cm.length !== N) {
+                        alert("Selected jobs must have the SAME number of samples (clean_correct_mask length mismatch).");
+                        return;
+                    }
                     for (let i = 0; i < N; i++) {
-                    ensembleDists[i] = Math.min(ensembleDists[i], d[i]);
+                        if (cm[i] !== cleanMask[i]) {
+                            alert("Selected jobs must use the SAME sample set (clean_correct_mask differs).");
+                            return;
+                        }
+                    }
+
+                    // effective_dists length must match
+                    const dd = r.curve.detail.effective_dists;
+                    if (!Array.isArray(dd) || dd.length !== N) {
+                        alert("Selected jobs must have effective_dists with the SAME length as clean_correct_mask.");
+                        return;
+                    }
+
+                    // (Optional but good) sample_indices match (if present)
+                    const idxJ = r.curve.detail.sample_indices || null;
+                    if (baseSampleIdx && baseSampleIdx.length > 0) {
+                        if (!idxJ || idxJ.length !== baseSampleIdx.length) {
+                            alert("Selected jobs must use the SAME sample_indices.");
+                            return;
+                        }
+                        for (let i = 0; i < baseSampleIdx.length; i++) {
+                            if (idxJ[i] !== baseSampleIdx[i]) {
+                                alert("Selected jobs must use the SAME sample_indices (order/content differs).");
+                                return;
+                            }
+                        }
                     }
                 }
 
-                // --- Compute exact ensemble curve ---
-                const ensembleRA = computeCurveFromDistances(baseEps, cleanMask, ensembleDists);
 
-                // --- Render ONLY the ensemble curve dataset ---
-                curveChart.data.datasets = [{
-                    label: `Exact Ensemble (min per-sample) | ${base.model_name} | ${base.attack_type.split("-")[1]} | n=${jobs.length}`,
-                    data: baseEps.map((e, i) => ({ x: e, y: ensembleRA[i] })),
-                    tension: 0.1
-                }];
-                curveChart.update();
+
+                // ---- Build prefix curves and metrics (order matters!) ----
+                const eps = baseEps;
+                const epsRange = eps[eps.length - 1] - eps[0];
+
+                // Data storage for rows
+                const tableRows = [];
+                
+                // --- STEP 0: Clean Accuracy (Baseline) ---
+                // For the clean state, effective distance is Infinite (attack never succeeds)
+                // This creates a flat curve at the level of Clean Accuracy.
+                const cleanDists = new Array(N).fill(Number.POSITIVE_INFINITY);
+                const cleanCurve = computeCurveFromDistances(eps, cleanMask, cleanDists);
+                const cleanAuc = trapezoidAUC(eps, cleanCurve);
+                //const cleanAucNorm = cleanAuc;
+                const cleanAucNorm = cleanAuc / (epsRange * 100.0);
+                // FIX: Extract timing safely from the base job
+                const tLoad = base.timing?.model_load_sec || 0;
+                const tData = base.timing?.data_load_sec || 0;
+                const tViz  = base.timing?.viz_sec || 0;
+                const baselineTime = tLoad + tData + tViz;
+                const ram0Raw = base.rss_peak_upto_clean_mb ?? base.rss_peak_mb ?? base.rss_end_mb ?? base.rss_start_mb;
+                const ram0 = (ram0Raw === null || ram0Raw === undefined) ? "n/a" : Number(ram0Raw);
+
+
+
+                tableRows.push({
+                    step: 0,
+                    attackDesc: "Clean accuracy",
+                    aucNorm: cleanAucNorm,
+                    deltaAuc: 0.0, // No delta for baseline
+                
+                    time: baselineTime,
+                    deltaTime: "n/a",
+                    cumTime: baselineTime,
+                    ram: ram0 ,
+                    deltaRam: 0,
+                    cumRam: ram0 
+                });
+
+                // Variables for accumulation
+                let runningMinDists = new Array(N).fill(Number.POSITIVE_INFINITY);
+                let cumSec = 0;
+                let cumParallelRam = 0;
+                let prevAuc = cleanAucNorm; // To track Delta AUC from previous step
+                const accumulatedNames = []; // To store the combination of attacks
+
+                // --- STEP 1 to N: Iterate Selected Jobs ---
+                for (let k = 0; k < jobs.length; k++) {
+                    const resK = jobs[k].res;
+                    const d = resK.curve.detail.effective_dists.map(Number);
+                    
+                    // 1. Update RAM stats
+                    const ramPeak = Number(
+                        resK.rss_peak_mb ?? resK.rss_end_mb ?? resK.rss_start_mb ?? 0
+                    );
+                    cumParallelRam += ramPeak;
+
+                    // 2. Update Ensemble Distances (Min)
+                    for (let i = 0; i < N; i++) {
+                        runningMinDists[i] = Math.min(runningMinDists[i], d[i]);
+                    }
+
+                    // 3. Compute Curve & AUC
+                    const raPrefix = computeCurveFromDistances(eps, cleanMask, runningMinDists);
+                    const auc = trapezoidAUC(eps, raPrefix);
+                    //const aucNorm = auc;
+                    const aucNorm = auc / (epsRange * 100.0);
+
+                    // 4. Time
+                    const t = getAttackSeconds(resK);
+                    if (t != null) cumSec += t;
+
+                    // 5. Build Attack Description (Name + Params)
+                    const hp = `target=${resK.fmn_target ?? "None"}, steps=${resK.num_steps}, gamma=${resK.gamma}`;
+                    const attackStr = `<b>${resK.attack_type}</b> <small>(${hp})</small>`;
+                    accumulatedNames.push(attackStr);
+
+                    // 6. Push Row Data
+                    tableRows.push({
+                        step: k + 1,
+                        // Join all attacks in the current ensemble with a line break
+                        attackDesc: accumulatedNames.join("<br>+ "), 
+                        aucNorm: aucNorm,
+                        deltaAuc: prevAuc - aucNorm, 
+                        time: t,
+                        deltaTime: t,
+                        cumTime: cumSec,
+                        ram: ramPeak,
+                        deltaRam: ramPeak,
+                        cumRam: cumParallelRam
+                    });
+
+                    prevAuc = aucNorm;
                 }
 
+
+
+              
+                // 1. Update Curve Chart (Security Evaluation Curve)
+                // Recalculate the final curve using the combined minimum distances
+                const finalCurve = computeCurveFromDistances(eps, cleanMask, runningMinDists);
+                const curvePoints = eps.map((e, i) => ({ x: e, y: finalCurve[i] }));
+
+
+                // build a plain-text label from accumulatedNames (remove HTML tags)
+                const plainNames = accumulatedNames.map(s => s.replace(/<[^>]+>/g, '')).join(' + ');
+                // optionally truncate for chart readability
+                const ensembleLabel = plainNames.length > 80 ? plainNames.slice(0, 77) + '...' : plainNames;
+
+
+
+                curveChart.data.datasets.push({
+                    label:`Ensemble: ${ensembleLabel}`,
+                    data: curvePoints,
+                    borderColor: '#000000', // Black line for ensemble
+                    borderWidth: 3,
+                    tension: 0.1
+                });
+                curveChart.update();
+
+                // 2. Update Bar Chart (Clean vs Robust Accuracy)
+                // Calculate Clean Accuracy % (Sum of 1s in mask / Total N)
+                const cleanCount = cleanMask.reduce((a, b) => a + b, 0);
+                const cleanAcc = (cleanCount / N) * 100;
+
+                // Calculate Robust Accuracy % (The value at the largest epsilon)
+                const robustAcc = finalCurve[finalCurve.length - 1];
+
+                resultsChart.data.labels.push(`Ensemble: ${ensembleLabel}`);
+                resultsChart.data.datasets[0].data.push(cleanAcc);
+                resultsChart.data.datasets[1].data.push(robustAcc);
+                resultsChart.update();
+                
+
+                // --- Render HTML Table ---
+                const metricsDiv = document.getElementById("ensembleMetrics");
+                const metricsContent = document.getElementById("ensembleMetricsContent");
+
+                function fmtNum(v, digits) {
+                    if (v === null || v === undefined || v === "n/a") return "-";
+                    const n = Number(v);
+                    return Number.isFinite(n) ? n.toFixed(digits) : "-";
+                    }
+
+
+                // - Generate CSV Content --
+                const csvHeader = ["Step", "Attacks included", "AUC (SecML)", "Delta AUC", "Time (s)", "Delta Time (s)", "Cumul. Time (s)", "RAM Peak (MB)", "Delta RAM", "Cumul. Parallel RAM"];
+                
+                const csvLines = [csvHeader.join(",")];
+
+                tableRows.forEach(r => {
+                    // Remove HTML tags (<b>, <br>, <small>) from the description for the CSV file
+                    let cleanDesc = r.attackDesc.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+                    // Escape double quotes if they exist
+                    cleanDesc = `"${cleanDesc}"`;
+
+                    const line = [
+                        r.step,
+                        cleanDesc,
+                        (r.aucNorm || 0).toFixed(4),
+                        (r.deltaAuc || 0).toFixed(4),
+                        (r.time || 0).toFixed(3),
+                        (r.deltaTime === "n/a" ? "" : Number(r.deltaTime).toFixed(3)),
+                        (r.cumTime || 0).toFixed(3),
+                        (r.ram || 0).toFixed(2),
+                        (r.deltaRam || 0).toFixed(2),
+                        (r.cumRam || 0).toFixed(2)
+                    ].join(",");
+                    csvLines.push(line);
+                });
+
+                ensembleCsvData = csvLines.join("\n");
+            
+                
+
+
+                // Generate Table Rows HTML
+                const rowsHtml = tableRows.map(r => `
+                    <tr>
+                        <td style="font-weight:bold;">${r.step}</td>
+                        <td style="font-size: 0.9em; line-height: 1.4em;">${r.attackDesc}</td>
+                        <td>${fmtNum(r.aucNorm, 4)}</td>
+                        <td>${r.step === 0 ? "-" : fmtNum(r.deltaAuc, 4)}</td>
+                        <td>${fmtNum(r.time, 3)}</td>
+                        <td>${fmtNum(r.deltaTime, 3)}</td>
+                        <td>${fmtNum(r.cumTime, 3)}</td>
+                        <td>${fmtNum(r.ram, 2)}</td>
+                        <td>${fmtNum(r.deltaRam, 2)}</td>
+                        <td>${fmtNum(r.cumRam, 2)}</td>
+
+                        
+                    </tr>
+                `).join("");
+
+               
+                metricsContent.innerHTML = `
+               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <p style="margin: 0;">
+                        <strong>Interpretation:</strong>
+                        "Step 0" represents the baseline (Clean Accuracy) with no attacks. 
+                        Subsequent steps add attacks to the ensemble.
+                        <strong>ΔAUC</strong> is the reduction in Robust Accuracy AUC caused by adding the new attack.
+                    </p>
+                    <button onclick="downloadEnsembleCsv()" style="background-color: #28a745; font-size: 0.9rem; padding: 5px 15px;">
+                        Download CSV
+                    </button>
+                </div>
+
+                <table style="width:100%; border-collapse: collapse; text-align: left;" border="1" cellpadding="8">
+                    <thead style="background-color: #f3f3f3;">
+                    <tr>
+                        <th>Step</th>
+                        <th>Attacks included</th>
+                        <th>AUC (SecML)</th>
+                        <th>ΔAUC</th>
+                        <th>Time (s)</th>
+                        <th>ΔTime (s)</th>
+                        <th>Cumul. Time (s)</th>
+                        <th>RAM Peak (MB)</th>
+                        <th>ΔRAM</th>
+                        <th>Cumul. Parallel RAM</th>
+                    </tr>
+                    </thead>
+                    <tbody>${rowsHtml}</tbody>
+                </table>
+                `;
+                
+                metricsDiv.style.display = "block";
+                
+            function trapezoidAUC(xs, ys) {
+            // xs: epsilon array (increasing), ys: robust accuracy (%) array
+            let area = 0;
+            for (let i = 0; i < xs.length - 1; i++) {
+                const dx = xs[i + 1] - xs[i];
+                const y0 = ys[i];
+                const y1 = ys[i + 1];
+                area += dx * (y0 + y1) / 2;
+            }
+            return area; // units: (% * epsilon)
+            }
+
+            function getAttackSeconds(res) {
+            // Prioritize total_sec (full wall time) instead of attack_sec
+            if (res?.timing?.total_sec != null) return Number(res.timing.total_sec);
+            
+            // fallback: if total_sec is missing (e.g. older jobs)
+            if (res?.duration_sec != null) return Number(res.duration_sec);
+            
+            // Final fallback to attack_sec if nothing else exists
+            if (res?.timing?.attack_sec != null) return Number(res.timing.attack_sec);
+           
+            return null;
+            }
+            }
 
 
 
@@ -602,7 +927,8 @@
                         <li><strong>Visualization:</strong> ${timing.viz_sec ?? "n/a"}s</li>
                         <li><strong>Python Peak Alloc:</strong> ${res.py_peak_alloc_mb ?? res.memory_peak_mb} MB</li>
                         <li><strong>RSS Start/End:</strong> ${res.rss_start_mb ?? "n/a"} / ${res.rss_end_mb ?? "n/a"} MB</li>
-        
+                        <li><strong>RSS Peak:</strong> ${res.rss_peak_mb ?? "n/a"} MB</li>
+
                     </ul>
                 </div>
                 `;
@@ -680,6 +1006,28 @@
 
 
 
-    </script>
+
+        // FUNCTION: Download CSV
+    function downloadEnsembleCsv() {
+        if (!ensembleCsvData) {
+            alert("No CSV data available to download.");
+            return;
+        }
+        
+        // Create a blob from the CSV string
+        const blob = new Blob([ensembleCsvData], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        
+        // Create a temporary link to trigger the download
+        const link = document.createElement("a");
+        link.setAttribute("href", url);
+        link.setAttribute("download", "ensemble_metrics.csv");
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
+   
+   </script>
 </body>
 </html>
