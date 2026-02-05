@@ -27,13 +27,10 @@ RB_MANUAL = {
     "Gowal2021Improving_70_16_ddpm_100m": {
         "linf": 66.10,
         "l2":   0.0,
-    }
-
-    
+    } 
 }
 
 def get_robustbench_point(model_name: str, p_model: str):
-    # Only show “standard” RobustBench points for Linf/L2
     if p_model == "linf":
         threat_model = "Linf"
         rb_epsilon = 8.0 / 255.0
@@ -56,4 +53,4 @@ def get_robustbench_point(model_name: str, p_model: str):
         "robust_accuracy": float(rb_rob),  # already in percent
         "threat_model": threat_model,
         "source": "manual"
-    }
+  }
