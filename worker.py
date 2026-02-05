@@ -48,9 +48,15 @@ def batch_lp_norm(delta: torch.Tensor, p_model: str) -> torch.Tensor:
 
 
 @celery_app.task(name="create_task")
-def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_time,gamma=0.05,perturbation_model="linf",eps_min=0.0, eps_max=0.1, eps_points=21):
+def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_time,gamma=0.05,perturbation_model="linf",eps_min=0.0, eps_max=0.1, eps_points=21,target=None):
     process = psutil.Process(os.getpid())
     rss_start_mb = process.memory_info().rss / (1024 * 1024)
+    def rss_mb():
+        return process.memory_info().rss / (1024 * 1024)
+
+    rss_peak_mb = rss_start_mb
+
+    
     # Capture the exact time the worker actually starts processing
     start_time_queue = time.time()
 
@@ -97,6 +103,8 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
 
         t1_model = time.monotonic()
         print("\nWorker: Model loaded successfully.")
+        rss_peak_mb = max(rss_peak_mb, rss_mb())
+
     except Exception as e:
         print(f"Worker Error during model loading: {e}")
         traceback.print_exc()
@@ -125,7 +133,10 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
         t0_data = time.monotonic()
         print("Worker: Loading real CIFAR-10 test images...")
 
-        
+        # We use torchvision to download the official test set.
+        # root='./data': Saves files to a 'data' folder in the project
+        # train=False: We want the TEST set (for evaluation), not training data
+        # transform=ToTensor(): Converts images to PyTorch Tensors [0, 1]
         test_dataset = torchvision.datasets.CIFAR10(
             root='./data',
             train=False,
@@ -150,6 +161,7 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
 
         t1_data = time.monotonic()
         print(f"\nWorker: Batch created. True Labels: {[cifar10_labels[l] for l in true_labels]}")
+        rss_peak_mb = max(rss_peak_mb, rss_mb())
 
     except Exception as e:
         print(f"\n Worker Error during data loading: {e}")
@@ -168,6 +180,10 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
         clean_correct = (clean_preds == true_labels).sum().item()
         clean_acc_percent = (clean_correct / batch_size) * 100
         print(f"\n Worker: Clean Accuracy: {clean_acc_percent}%")
+        
+        rss_peak_mb = max(rss_peak_mb, rss_mb())
+        rss_peak_upto_clean_mb = rss_peak_mb
+
     except Exception as e:
         print(f"Worker Error during clean accuracy evaluation: {e}")
         traceback.print_exc()
@@ -219,7 +235,7 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
             # Extract 'linf', 'l2', or 'l1' from string 'fmn-linf'
             p_model = attack_type.split("-")[1]
             rb_point = get_robustbench_point(model_to_load, p_model)
-
+            y_target = int(target) if target is not None else None
 
             if(p_model == "linf"):
                 # FMN L-infinity Attack
@@ -227,7 +243,8 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
                     perturbation_model="linf",
                     num_steps=int(num_steps),
                     step_size=float(step_size),
-                    gamma=float(gamma)
+                    gamma=float(gamma),
+                    y_target=y_target,
                 )
             elif(p_model == "l2"):
                 # FMN L2 Attack
@@ -235,7 +252,8 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
                     perturbation_model="l2",
                     num_steps=int(num_steps),
                     step_size=float(step_size),
-                    gamma=float(gamma)
+                    gamma=float(gamma),
+                    y_target=y_target,
                 )
             elif(p_model == "l1"):
                 # FMN L1 Attack
@@ -243,7 +261,8 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
                     perturbation_model="l1",
                     num_steps=int(num_steps),
                     step_size=float(step_size),
-                    gamma=float(gamma)
+                    gamma=float(gamma),
+                    y_target=y_target,
                 )
 
         else:
@@ -253,19 +272,25 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
 
 
         # --- Create a DataLoader for the Attack ---
+        # The library expects an iterable that yields (image_batch, label_batch)
         dataset = TensorDataset(images, true_labels)
         attack_loader = DataLoader(dataset, batch_size=batch_size)
+
 
         # Run the attack
         # WE PASS TWO ARGUMENTS: (Model, DataLoader)
         # It returns a new DataLoader containing the adversarial images
-        adv_loader = attack(secml_model, attack_loader)
+        if attack_type.startswith("fmn") :
+            adv_loader = attack(secml_model, attack_loader)
+               
 
         # Extract the adversarial images from the returned loader
         # Since we only have 1 batch, we just grab the first item
         adversarial_images, _ = next(iter(adv_loader))
         t1_attack = time.monotonic()
         print(f"\n Worker: {attack_type} Attack completed.")
+        rss_peak_mb = max(rss_peak_mb, rss_mb())
+
     except Exception as e:
         print(f"Worker Error during PGD attack: {e}")
         traceback.print_exc()
@@ -292,7 +317,11 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
             clean_correct_mask = (clean_preds == true_labels)          # (N,)
 
             # Attack success means adv prediction != true label
-            attack_success_mask = (adv_preds != true_labels)           # (N,)
+            if target is None:
+                attack_success_mask = (adv_preds != true_labels)   # untargeted
+            else:
+                attack_success_mask = (adv_preds == int(target))   # targeted success
+
 
             # Compute per-sample perturbation size ||adv - orig||_p
             delta = (adversarial_images - images).detach()
@@ -316,10 +345,6 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
                 "effective_dists": effective_dists_json,     # float list, inf replaced
                 "inf_sentinel": INF_SENTINEL
             }
-
-
-
-
 
 
 
@@ -353,9 +378,6 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
             robust_accuracy = (robust_correct / batch_size) * 100.0
 
                 
-       
-
-
 
         # --- Performance Metrics Calculation ---
         end_time = time.time()
@@ -400,6 +422,7 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
         img_noise_b64 = tensor_to_base64(noise_tensor, amplify=True)
         
         t1_viz = time.monotonic()
+        rss_peak_mb = max(rss_peak_mb, rss_mb())
 
         # Stop timers
         t1_total = time.monotonic()
@@ -435,11 +458,18 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
             "memory_peak_mb": f"{peak_mem_mb:.2f}",
             "rss_start_mb": round(rss_start_mb, 2),
             "rss_end_mb": round(rss_end_mb, 2),
+            "rss_peak_mb": round(rss_peak_mb, 2),
+            "rss_peak_upto_clean_mb": round(rss_peak_upto_clean_mb, 2),
+
             "epsilon": epsilon,
             "num_steps": num_steps,
+            "gamma": gamma,
             "step_size": step_size,
             "robustbench_point": rb_point,
-            # Add images to the response
+            "fmn_target": (int(target) if target is not None else None),
+            "attack_label": f"{attack_type} | target={target}",
+
+             # Add images to the response
             "images": {
                 "original": img_orig_b64,
                 "adversarial": img_adv_b64,
