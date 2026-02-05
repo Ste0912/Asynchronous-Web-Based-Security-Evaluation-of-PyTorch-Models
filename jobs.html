@@ -44,6 +44,7 @@
   <script>
 
   const selected = new Set();
+  const selectedOrder = []; // keeps the order of selection (first checked, second checked, ...)
 
   function eligible(j) {
     return j.status === "success" && typeof j.attack === "string" && j.attack.startsWith("fmn-");
@@ -54,8 +55,6 @@
   function updateSelInfo() {
     document.getElementById("selInfo").textContent = `Selected: ${selected.size}`;
   }
-
-
 
     function getQueryParam(name) {
       const url = new URL(window.location.href);
@@ -69,7 +68,7 @@
     back.href = `/static/index.html?job_id=${encodeURIComponent(currentJobId)}`;
     }
 
-  
+
 
     function normFromAttack(a) {
       // "fmn-linf" -> "linf"
@@ -115,9 +114,10 @@ function updateSelInfo() {
                   data-jobid="${j.job_id}"
                   data-model="${j.model}"
                   data-attack="${j.attack}"
-                  data-epsmin="$hp.eps_min ?? ""}"
+                  data-epsmin="${hp.eps_min ?? ""}"
                   data-epsmax="${hp.eps_max ?? ""}"
                   data-epspoints="${hp.eps_points ?? ""}"
+
                   ${checked} ${disabled}
                 />
             </td>
@@ -129,8 +129,18 @@ function updateSelInfo() {
         if (cb) {
           cb.addEventListener("change", (e) => {
             const id = e.target.dataset.jobid;
-            if (e.target.checked) selected.add(id);
-            else selected.delete(id);
+            if (e.target.checked)
+            {
+              selected.add(id);
+              if (!selectedOrder.includes(id)) selectedOrder.push(id);
+
+            } 
+            else 
+            {
+              selected.delete(id);
+              const index = selectedOrder.indexOf(id);
+              if (index !== -1) selectedOrder.splice(index, 1);
+            }
             updateSelInfo();
           });
       }
@@ -152,15 +162,16 @@ function updateSelInfo() {
     }
 
 
- 
+    /*  EVENT LISTENERS  */
     document.getElementById("clearSelection").addEventListener("click", () => {
       selected.clear();
+      selectedOrder.length = 0;
       updateSelInfo();
       refreshTable(); // re-render with all checkboxes cleared
     });
 
     document.getElementById("viewSelectedCurves").addEventListener("click", () => {
-      const ids = Array.from(selected);
+      const ids = selectedOrder.slice();
       if (ids.length === 0) {
         alert("Select at least one SUCCESS FMN job.");
         return;
@@ -191,7 +202,7 @@ function updateSelInfo() {
       const mode = (ids.length === 1) ? "single" : "ensemble";
       window.location.href = `/static/index.html?curve_jobs=${encodeURIComponent(ids.join(","))}&curve_mode=${mode}`;
     });
-   
+    /* END INSERT */
 
 
     // initial + poll
