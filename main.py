@@ -1,5 +1,10 @@
 import time
+import os
+import json
+import redis
+from fastapi import Query
 from typing import Dict, Any
+from typing import Optional
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
@@ -8,12 +13,17 @@ from worker import create_task
 
 
 app = FastAPI()
+# --- Redis metadata store (separate DB from Celery backend) ---
+APP_REDIS_URL = os.getenv("APP_REDIS_URL", "redis://localhost:6379/1")
+r = redis.Redis.from_url(APP_REDIS_URL, decode_responses=True)
+
+JOB_KEY_PREFIX = "secml:job:"        # hash per job: secml:job:<job_id>
+JOBS_INDEX_KEY = "secml:jobs:index"  # sorted set of job_ids by submitted_at
+
 
 # --- Serve the "static" folder at the "/static" URL ---
 app.mount("/static", StaticFiles(directory="static", html=True), name="static")
 
-# In-memory registry: job_id -> metadata
-JOB_STORE: Dict[str, Dict[str, Any]] = {}
 
 #Redirect root URL (/) to the dashboard
 @app.get("/")
@@ -33,35 +43,45 @@ def submit_eval(
         # epsilon sweep params (used by FMN curve; harmless for PGD)
         eps_min: float = 0.0,
         eps_max: float = 0.1,
-        eps_points: int = 21
-        
+        eps_points: int = 21,
+        target: Optional[int] = None,
                 ):
    
     #Capture the timestamp of submission (Enqueue Time)
     submit_time = time.time()
+    # Send task to Redis, passing ALL parameters to the worker
+    task = create_task.delay(model_name,attack_type, epsilon, num_steps, step_size, submit_time,gamma,perturbation_model,eps_min, eps_max, eps_points, target)
+    
+    meta = {
+    "job_id": task.id,
+    "model": model_name,
+    "attack": attack_type,
+    "submitted_at": str(submit_time),
+    "hyperparameters_json": json.dumps({
+        "epsilon": epsilon,
+        "num_steps": num_steps,
+        "step_size": step_size,
+        "gamma": gamma,
+        "perturbation_model": perturbation_model,
+        "eps_min": eps_min,
+        "eps_max": eps_max,
+        "eps_points": eps_points,
+        "target": target,
 
-    task = create_task.delay(model_name,attack_type, epsilon, num_steps, step_size, submit_time,gamma,perturbation_model,eps_min, eps_max, eps_points)
-    
-     # record job metadata so we can show it later in the table
-    JOB_STORE[task.id] = {
-        "job_id": task.id,
-        "model": model_name,
-        "attack": attack_type,
-        "hyperparameters_of_attack": {
-            "epsilon": epsilon,
-            "num_steps": num_steps,
-            "step_size": step_size,
-            "gamma": gamma,
-            "perturbation_model": perturbation_model,
-            "eps_min": eps_min,
-            "eps_max": eps_max,
-            "eps_points": eps_points,
-        },
-        "submitted_at": submit_time,
-    }   
-    
-    
-    
+    }),
+    }
+
+    job_key = f"{JOB_KEY_PREFIX}{task.id}"
+
+    # 1) store metadata for this job
+    r.hset(job_key, mapping=meta)
+
+    # 2) add to global index (newest first later)
+    r.zadd(JOBS_INDEX_KEY, {task.id: submit_time})
+
+    # optional: auto-expire metadata after 14 days
+    r.expire(job_key, 14 * 24 * 3600)
+
     return {"job_id": task.id, "message": "Evaluation Task enqueued"}
 
 
@@ -92,22 +112,36 @@ def simplify_status(celery_status: str) -> str:
 
 
 @app.get("/jobs")
-def list_jobs():
+def list_jobs(limit: int = Query(200, ge=1, le=2000)):
     rows = []
 
-    # return newest first (optional)
-    items = sorted(JOB_STORE.values(), key=lambda x: x["submitted_at"], reverse=True)
+    # newest first
+    job_ids = r.zrevrange(JOBS_INDEX_KEY, 0, limit - 1)
 
-    for meta in items:
-        job_id = meta["job_id"]
+    for job_id in job_ids:
+        job_key = f"{JOB_KEY_PREFIX}{job_id}"
+        meta = r.hgetall(job_key)
+
+        if not meta:
+            # metadata missing (e.g. expired) -> clean index entry
+            r.zrem(JOBS_INDEX_KEY, job_id)
+            continue
+
+        # decode hyperparameters
+        try:
+            hp = json.loads(meta.get("hyperparameters_json", "{}"))
+        except json.JSONDecodeError:
+            hp = {}
+
+        # Celery status/result still comes from Celery backend (Redis DB 0)
         task_result = AsyncResult(job_id, app=create_task.app)
         celery_status = task_result.status
 
         rows.append({
             "job_id": job_id,
-            "model": meta["model"],
-            "attack": meta["attack"],
-            "hyperparameters_of_attack": meta["hyperparameters_of_attack"],
+            "model": meta.get("model"),
+            "attack": meta.get("attack"),
+            "hyperparameters_of_attack": hp,
             "status": simplify_status(celery_status),
             "celery_status": celery_status,
         })
@@ -117,11 +151,19 @@ def list_jobs():
 
 
 
+
 #Delete endpoint to remove a job
-#@app.delete("/delete_job/{job_id}")
-#def delete_job(job_id: str):
-#    task_result = AsyncResult(job_id, app=create_dummy_task.app)
-#    if task_result.state != 'PENDING':
-#        task_result.forget()
-#    return {"job_id": job_id, "message": "Job deleted"}
+@app.delete("/delete_job/{job_id}")
+def delete_job(job_id: str):
+    r.delete(f"{JOB_KEY_PREFIX}{job_id}")
+    r.zrem(JOBS_INDEX_KEY, job_id)
+
+    # optional: delete celery result too
+    task_result = AsyncResult(job_id, app=create_task.app)
+    try:
+        task_result.forget()
+    except Exception:
+        pass
+
+    return {"job_id": job_id, "message": "Job deleted"}
 
