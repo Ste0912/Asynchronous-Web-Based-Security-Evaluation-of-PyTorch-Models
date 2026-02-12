@@ -2,6 +2,8 @@ from celery import Celery
 import torch
 import traceback
 import torchvision
+import redis
+import json
 import time
 import tracemalloc      # For memory tracking
 import io
@@ -30,6 +32,37 @@ celery_app = Celery(
     backend="redis://localhost:6379/0"
 )
 
+# --- Redis DB1 for durable storage 
+APP_REDIS_URL = os.getenv("APP_REDIS_URL", "redis://localhost:6379/1")
+app_r = redis.Redis.from_url(APP_REDIS_URL, decode_responses=True)
+
+JOB_KEY_PREFIX = "secml:job:"
+
+def persist_final_result(job_id: str, celery_status: str, result_payload: dict):
+    job_key = f"{JOB_KEY_PREFIX}{job_id}"
+    app_r.hset(job_key, mapping={
+        "stored_status": celery_status,
+        "finished_at": str(time.time()),
+        # default=str avoids crash if something is not JSON-serializable
+        "result_json": json.dumps(result_payload),
+    })
+
+
+
+def get_device_name(device):
+    if device.type == "cuda":
+        return torch.cuda.get_device_name(0)
+    return "CPU"
+
+
+
+def fail_and_persist(job_id: str, error: Exception):
+    payload = {"status": "Failed", "error": str(error)}
+    persist_final_result(job_id, "FAILURE", payload)
+    return payload
+
+
+
 def batch_lp_norm(delta: torch.Tensor, p_model: str) -> torch.Tensor:
     """
     delta: (N, C, H, W)
@@ -47,13 +80,15 @@ def batch_lp_norm(delta: torch.Tensor, p_model: str) -> torch.Tensor:
         raise ValueError(f"Unsupported perturbation_model: {p_model}")
 
 
-@celery_app.task(name="create_task")
-def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_time,gamma=0.05,perturbation_model="linf",eps_min=0.0, eps_max=0.1, eps_points=21,target=None):
+
+@celery_app.task(bind=True, name="create_task")
+def create_task(self, model_name,attack_type, epsilon, num_steps, step_size, submit_time,gamma=0.05,perturbation_model="linf",eps_min=0.0, eps_max=0.1, eps_points=21,target=None):
+    job_id = self.request.id
     process = psutil.Process(os.getpid())
-    rss_start_mb = process.memory_info().rss / (1024 * 1024)
     def rss_mb():
         return process.memory_info().rss / (1024 * 1024)
-
+    rss_start_mb = rss_mb()
+   
     rss_peak_mb = rss_start_mb
 
     
@@ -96,7 +131,7 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
         t0_model = time.monotonic()
         print(f"\n Worker: Downloading/Loading {model_to_load} from RobustBench...")
        
-        # dataset='cifar10' and threat_model='Linf'
+        # We assume dataset='cifar10' and threat_model='Linf'
         model = load_model(model_name=model_to_load, dataset='cifar10', threat_model='Linf')
         model.eval()
         model = model.to(device)
@@ -108,10 +143,8 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
     except Exception as e:
         print(f"Worker Error during model loading: {e}")
         traceback.print_exc()
-        return {
-            "status": "Failed",
-            "error": str(e)
-        }
+        return fail_and_persist(job_id, e)
+
 
     try:
         # --- PHASE 2: WRAP MODEL ---
@@ -123,20 +156,15 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
     except Exception as e:
         print(f"\nWorker Error during model wrapping: {e}")
         traceback.print_exc()
-        return {
-            "status": "Failed",
-            "error": str(e)
-        }
+        return fail_and_persist(job_id, e)
+
 
     try:
         # --- PHASE 3: LOAD REAL DATA (CIFAR-10) ---
         t0_data = time.monotonic()
         print("Worker: Loading real CIFAR-10 test images...")
 
-        # We use torchvision to download the official test set.
-        # root='./data': Saves files to a 'data' folder in the project
-        # train=False: We want the TEST set (for evaluation), not training data
-        # transform=ToTensor(): Converts images to PyTorch Tensors [0, 1]
+        
         test_dataset = torchvision.datasets.CIFAR10(
             root='./data',
             train=False,
@@ -145,7 +173,7 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
         )
 
         # Select the first 10 images from the dataset
-        batch_size = 10
+        batch_size = 20
         indices = range(batch_size)
 
         # Extract images and labels
@@ -166,10 +194,8 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
     except Exception as e:
         print(f"\n Worker Error during data loading: {e}")
         traceback.print_exc()
-        return {
-            "status": "Failed",
-            "error": str(e)
-        }
+        return fail_and_persist(job_id, e)
+
 
     try:
         # --- PHASE 4: CHECK CLEAN ACCURACY ---
@@ -187,10 +213,8 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
     except Exception as e:
         print(f"Worker Error during clean accuracy evaluation: {e}")
         traceback.print_exc()
-        return {
-            "status": "Failed",
-            "error": str(e)
-        }
+        return fail_and_persist(job_id, e)
+
 
     try:
         # --- PHASE 5: RUN PGD ATTACK ---
@@ -294,10 +318,8 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
     except Exception as e:
         print(f"Worker Error during PGD attack: {e}")
         traceback.print_exc()
-        return {
-            "status": "Failed",
-            "error": str(e)
-        }
+        return fail_and_persist(job_id, e)
+
     try:
         # --- PHASE 6: EVALUATE ROBUSTNESS ---
         print("\n Worker: Evaluating attack impact...")
@@ -340,11 +362,15 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
             clean_correct_json = clean_correct_mask.detach().cpu().to(torch.int).numpy().tolist()
 
             curve_detail = {
-                "sample_indices": list(range(batch_size)),   # matches your selected indices = first 10
+                "sample_indices": list(range(batch_size)),   
                 "clean_correct_mask": clean_correct_json,    # 0/1
-                "effective_dists": effective_dists_json,     # float list, inf replaced
+                "effective_dists": effective_dists_json,     # float list
                 "inf_sentinel": INF_SENTINEL
             }
+
+
+
+
 
 
 
@@ -378,6 +404,9 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
             robust_accuracy = (robust_correct / batch_size) * 100.0
 
                 
+       
+
+
 
         # --- Performance Metrics Calculation ---
         end_time = time.time()
@@ -399,10 +428,8 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
     except Exception as e:
         print(f"Worker Error: {e}")
         traceback.print_exc()
-        return {
-            "status": "Failed",
-            "error": str(e)
-        }
+        return fail_and_persist(job_id, e)
+
 
     try:
         # --- PHASE 7: PREPARE VISUALIZATION (Sample 0) ---
@@ -442,9 +469,10 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
     }
         rss_end_mb = process.memory_info().rss / (1024 * 1024)
 
-        return {
+        final_payload={
             "status": "Completed",
             "model_name": model_name,
+            "device_name": get_device_name(device),
             "clean_accuracy": f"{clean_acc_percent:.1f}%",
             "robust_accuracy": f"{robust_accuracy:.1f}%",
             "curve": curve_payload,
@@ -477,14 +505,18 @@ def create_task(model_name,attack_type, epsilon, num_steps, step_size, submit_ti
             }
         }
 
+        persist_final_result(job_id, "SUCCESS", final_payload)
+        return final_payload
+
+
 
     except Exception as e:
         print(f"Worker Error: {e}")
         traceback.print_exc()
-        return {
-            "status": "Failed",
-            "error": str(e)
-        }
+        return fail_and_persist(job_id, e)
+
+
+
 
 
 def tensor_to_base64(tensor, amplify=False):
