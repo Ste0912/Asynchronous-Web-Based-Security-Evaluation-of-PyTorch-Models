@@ -25,7 +25,6 @@
   <span id="selInfo" style="margin-left:10px;"></span>
 
 
-  <p>This table includes all attacks    . Status updates automatically.</p>
 
   <table>
     <thead>
@@ -56,6 +55,8 @@
     document.getElementById("selInfo").textContent = `Selected: ${selected.size}`;
   }
 
+
+
     function getQueryParam(name) {
       const url = new URL(window.location.href);
       return url.searchParams.get(name);
@@ -68,7 +69,7 @@
     back.href = `/static/index.html?job_id=${encodeURIComponent(currentJobId)}`;
     }
 
-
+  
 
     function normFromAttack(a) {
       // "fmn-linf" -> "linf"
