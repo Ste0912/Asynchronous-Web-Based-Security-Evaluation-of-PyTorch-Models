@@ -36,7 +36,7 @@ A robust, asynchronous web platform designed to evaluate the security of PyTorch
    cd /mnt/c/projects/Asynchronous_WebBased_Security_Evaluation_of_ML_Models
 
 2. **Create and activate a virtual environment:**
- ```bash
+  ```bash
 python3 -m venv venv_wsl
 source venv_wsl/bin/activate
  ```
@@ -83,6 +83,4 @@ uvicorn main:app --reload
 * `static/jobs.html`: Registry interface for viewing past attacks and selecting jobs for ensemble evaluation.
 * `robustbench_utils.py`: Utilities for retrieving baseline robust accuracy metrics.
 ```
-
-***
 
