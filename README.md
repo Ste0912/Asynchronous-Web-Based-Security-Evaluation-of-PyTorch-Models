@@ -6,7 +6,15 @@
 ![Redis](https://img.shields.io/badge/Redis-DC382D?style=flat&logo=redis&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=flat&logo=pytorch&logoColor=white)
 
-A robust, asynchronous web platform designed to evaluate the security of PyTorch models against adversarial machine learning attacks. Built with a decoupled architecture, this tool offloads heavy adversarial optimization tasks to background workers, ensuring a responsive and non-blocking user interface.
+A robust, asynchronous web platform designed to evaluate the security of PyTorch models against adversarial machine learning attacks. 
+Traditional benchmarks (e.g., RobustBench) often evaluate model robustness only at a fixed perturbation budget, providing an incomplete picture of a model's real-world vulnerabilities. This project overcomes those limitations by analyzing continuous security degradation curves, simulating both singular attacks and worst-case scenarios via custom attack ensembles. Built with a decoupled architecture, this tool offloads heavy adversarial optimization tasks to background workers, ensuring a responsive and non-blocking user interface.
+
+## Cybersecurity & MLOps Value
+Built with a Security Analyst perspective, this tool focuses on evaluating and mitigating risks in AI pipelines:
+* **Worst-Case Threat Modeling:** Evaluates the continuous degradation of model accuracy as attack intensity increases, identifying true model vulnerabilities through dynamic ensemble construction.
+* **MLOps Cost-Benefit Analysis:** Correlates the computational resources utilized (memory, execution time) during the evaluation with the actual security degradation, providing actionable metrics for MLOps and DevSecOps pipelines.
+* **Traceability & Reproducibility:** Automatically generates detailed, exportable reports (CSV, PDF, Markdown, LaTeX) of security experiments to ensure compliance, auditability, and academic reproducibility.
+
 
 ## Key Features
 
@@ -14,7 +22,7 @@ A robust, asynchronous web platform designed to evaluate the security of PyTorch
 * **Singular Security Evaluation Curves:** Automatically generate and visualize the robustness curve (accuracy vs. perturbation budget) for any individual attack run.
 * **Dynamic Ensemble Construction:** Navigate the job registry to select specific attacks and combine them into a custom ensemble threat model.
 * **Comparative Ensemble Visualizations:** Plot and compare the worst-case Ensemble Security Evaluation Curve directly against singular attack curves to identify true model vulnerabilities.
-* **Asynchronous Processing:** Utilizes Celery and Redis to handle intensive Machine Learning workloads in the background without blocking the UI.
+* **Asynchronous Processing:** Utilizes a decoupled architecture with Celery and Redis to handle intensive Machine Learning workloads in the background without blocking the UI.
 * **Qualitative Image Inspection:** Provides side-by-side visual comparisons of original inputs, adversarial examples, and amplified perturbation noise.
 * **Comprehensive Reporting:** Automatically generates and exports ensemble evaluation metrics to CSV, PDF, Markdown, and LaTeX formats for academic and professional reporting.
 
@@ -36,10 +44,10 @@ A robust, asynchronous web platform designed to evaluate the security of PyTorch
    cd /mnt/c/projects/Asynchronous_WebBased_Security_Evaluation_of_ML_Models
 
 2. **Create and activate a virtual environment:**
-  ```bash
-python3 -m venv venv_wsl
-source venv_wsl/bin/activate
- ```
+   ```bash
+      python3 -m venv venv_wsl
+      source venv_wsl/bin/activate
+    ```
 
 3. **Install dependencies:**
    ```bash
